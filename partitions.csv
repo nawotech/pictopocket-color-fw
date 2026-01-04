@@ -1,0 +1,7 @@
+# Name,   Type, SubType, Offset,  Size,     Flags
+# Note: ESP32-C6 with 4MB flash
+# This partition table maximizes app space by removing OTA and filesystem
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000, 0x3F0000,
+
