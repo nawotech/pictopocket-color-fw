@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include "wifi_config.h"
 
 // Store WiFi info in RTC memory to speed up reconnection after deep sleep
@@ -8,6 +10,78 @@ RTC_DATA_ATTR uint8_t saved_channel = 0;
 RTC_DATA_ATTR uint8_t saved_bssid[6] = {0};
 RTC_DATA_ATTR bool has_saved_info = false;
 RTC_DATA_ATTR int cycle_count = 0;
+
+// Stub function for handling new image
+void handleNewImage()
+{
+  Serial.println("→ New image detected! (stub function)");
+  // TODO: Implement image download and display logic here
+}
+
+// Check for new image from server
+bool checkForNewImage()
+{
+  WiFiClientSecure client;
+  HTTPClient http;
+
+  // For HTTPS, we need to skip certificate validation (or add proper cert)
+  // This is fine for testing, but consider adding proper certificate validation for production
+  client.setInsecure();
+
+  // Parse the base URL (remove https:// if present)
+  String baseUrl = String(CHECK_IMAGE_URL);
+  if (baseUrl.startsWith("https://"))
+  {
+    baseUrl = baseUrl.substring(8); // Remove "https://"
+  }
+
+  // Extract host (everything before the first /)
+  int slashIndex = baseUrl.indexOf('/');
+  String host = slashIndex > 0 ? baseUrl.substring(0, slashIndex) : baseUrl;
+  String path = slashIndex > 0 ? baseUrl.substring(slashIndex) : "/";
+
+  // Add query parameter to path
+  path += "?frameId=" + String(FRAME_ID);
+
+  Serial.print("Checking for new image: https://");
+  Serial.print(host);
+  Serial.println(path);
+
+  // Use begin with host, port, and path separately for better parsing
+  http.begin(client, host.c_str(), 443, path.c_str());
+  http.setTimeout(10000); // 10 second timeout
+
+  unsigned long request_start = millis();
+  int httpResponseCode = http.GET();
+  unsigned long request_time = millis() - request_start;
+
+  Serial.printf("HTTP Response: %d (took %lu ms)\n", httpResponseCode, request_time);
+
+  bool hasNewImage = false;
+
+  if (httpResponseCode == 200)
+  {
+    Serial.println("✓ New image available!");
+    hasNewImage = true;
+  }
+  else if (httpResponseCode == 204)
+  {
+    Serial.println("✓ No new image (204 No Content)");
+    hasNewImage = false;
+  }
+  else
+  {
+    Serial.printf("✗ Unexpected response code: %d\n", httpResponseCode);
+    if (httpResponseCode < 0)
+    {
+      Serial.printf("Error code: %d\n", httpResponseCode);
+    }
+    hasNewImage = false;
+  }
+
+  http.end();
+  return hasNewImage;
+}
 
 void setup()
 {
@@ -88,6 +162,13 @@ void setup()
                     saved_channel,
                     saved_bssid[0], saved_bssid[1], saved_bssid[2],
                     saved_bssid[3], saved_bssid[4], saved_bssid[5]);
+    }
+
+    // Check for new image
+    Serial.println("\n--- Checking for new image ---");
+    if (checkForNewImage())
+    {
+      handleNewImage();
     }
   }
   else
