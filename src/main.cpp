@@ -46,11 +46,6 @@ RTC_DATA_ATTR uint32_t saved_dns1 = 0;
 RTC_DATA_ATTR uint32_t saved_dns2 = 0;
 RTC_DATA_ATTR bool has_saved_ip = false;
 
-// Button pin (if available - defined in platformio.ini build_flags)
-#ifndef BUTTON_PIN
-// Button not configured - button functionality will be disabled
-#endif
-
 // Global state
 DeviceState deviceState;
 bool displayInitialized = false;
@@ -66,40 +61,26 @@ void goToDeepSleep();
 
 void setup()
 {
-  // CRITICAL: Initialize Serial FIRST before anything else
-  // For ESP32-C3 with USB CDC, this must be done early
   Serial.begin(115200);
 
-  // Wait for USB CDC to be ready (ESP32-C3 with USB CDC)
-  // This is critical - without it, Serial output may not appear
-  // Note: Serial may return false immediately after boot, so we wait up to 3 seconds
-  unsigned long startWait = millis();
-  while (!Serial && (millis() - startWait < 3000))
+  // Check wake reason
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  bool buttonWake = false;
+
+  switch (wakeup_reason)
   {
-    delay(10);
+  case ESP_SLEEP_WAKEUP_GPIO: // ESP32-C3 GPIO wakeup
+    Serial.println("Wakeup caused by button (GPIO)");
+    buttonWake = true;
+    break;
+  case ESP_SLEEP_WAKEUP_TIMER:
+    Serial.println("Wakeup caused by timer");
+    break;
+  default:
+    Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason);
+    break;
   }
 
-  // Additional delay to ensure USB CDC is fully initialized
-  delay(500);
-
-  // Force flush to ensure output buffer is clear
-  Serial.flush();
-  delay(100);
-
-  // Print test pattern immediately to verify Serial is working
-  Serial.println("\n\n");
-  Serial.println("========================================");
-  Serial.println("E-Ink Photo Frame - Wake Cycle");
-  Serial.println("========================================");
-  Serial.println("If you see this, Serial is working!");
-  Serial.flush();
-  delay(200);
-
-// With -DARDUINO_USB_CDC_ON_BOOT=1, Serial uses USB CDC, not hardware UART
-// Hardware UART pins (GPIO20/RX, GPIO21/TX) are free for GPIO use
-// No need to explicitly disable UART - it's not used when USB CDC is enabled
-
-// LED pin (defined in platformio.ini build_flags)
 #ifdef LED_PIN
   pinMode(LED_PIN, OUTPUT);
   // Blink LED to indicate wake from sleep
@@ -113,30 +94,8 @@ void setup()
   Serial.println("LED pin initialized (blinked to show wake)");
 #endif
 
-// Initialize button pin (if available - defined in platformio.ini build_flags)
-#ifdef BUTTON_PIN
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  Serial.printf("Button pin initialized on GPIO %d\n", BUTTON_PIN);
-  // ESP32-C3: Only GPIOs 0-5 are RTC GPIOs and can wake from deep sleep
-  if (BUTTON_PIN < 0 || BUTTON_PIN > 5)
-  {
-    Serial.println("WARNING: Button pin is NOT an RTC GPIO (must be 0-5 for deep sleep wake)");
-    Serial.println("Button wake from deep sleep will NOT work with this pin!");
-  }
-  else
-  {
-    Serial.println("Button pin is an RTC GPIO - wake from deep sleep is supported");
-  }
-#endif
-
   cycle_count++;
   Serial.printf("Wake cycle #%d\n", cycle_count);
-  Serial.flush();
-
-  // Test pattern to verify Serial is working
-  Serial.println("TEST: Serial output working!");
-  Serial.flush();
-  delay(100);
 
   // Load device state (loadState handles its own begin()/end())
   Serial.println("\n--- Loading device state ---");
@@ -161,15 +120,11 @@ void setup()
     }
   }
 
-  // Check for button press IMMEDIATELY after wake (before WiFi connection)
+  // Handle button wake - advance image immediately (before WiFi connection)
   // This allows manual image advance without waiting for network operations
-#ifdef BUTTON_PIN
-  Serial.println("\n--- Checking button ---");
-  // Button is active low with INPUT_PULLUP, so LOW means pressed
-  if (digitalRead(BUTTON_PIN) == LOW)
+  if (buttonWake)
   {
-    Serial.println("Button pressed - manual image advance");
-    // Button pressed - advance to next image
+    Serial.println("\n--- Button wake detected ---");
     if (deviceState.imageCount > 0)
     {
       int oldImageIndex = deviceState.currentImageIndex;
@@ -191,8 +146,6 @@ void setup()
     goToDeepSleep();
     return;
   }
-  Serial.println("No button press");
-#endif
 
   // Load device key
   Serial.println("\n--- Loading device key ---");
@@ -824,9 +777,6 @@ void advanceToNextImage()
 
 void goToDeepSleep()
 {
-  Serial.println("\n--- Going to deep sleep ---");
-  Serial.printf("Sleep duration: %d hours\n", WAKE_INTERVAL_HOURS);
-
   // Cleanup storage
   NVSStorage::end();
   FlashStorage::end();
@@ -836,33 +786,11 @@ void goToDeepSleep()
   digitalWrite(LED_PIN, LOW);
 #endif
 
-  Serial.println("========================================\n");
-  Serial.println("NOTE: After deep sleep, USB CDC may not work.");
-  Serial.println("You may need to manually reset the device to see Serial output again.");
-  Serial.flush(); // Ensure all output is sent before sleep
-  delay(500);     // Extra delay to ensure all output is sent
+  const uint64_t WAKEUP_LOW_PIN_BITMASK = 0b000100; // GPIO 2
+  esp_deep_sleep_enable_gpio_wakeup(WAKEUP_LOW_PIN_BITMASK, ESP_GPIO_WAKEUP_GPIO_LOW);
 
-  // Enable button as wake source (active low) - only for RTC GPIOs
-#ifdef BUTTON_PIN
-  // ESP32-C3: Only RTC GPIOs (0-5) can wake from deep sleep
-  if (BUTTON_PIN >= 0 && BUTTON_PIN <= 5)
-  {
-    // ESP32-C3 uses gpio_wakeup API for external wake
-    gpio_wakeup_enable((gpio_num_t)BUTTON_PIN, GPIO_INTR_LOW_LEVEL);
-    esp_sleep_enable_gpio_wakeup();
-    Serial.printf("Button wake enabled (active low) on GPIO %d\n", BUTTON_PIN);
-  }
-  else
-  {
-    Serial.printf("WARNING: GPIO %d is not an RTC GPIO - button wake disabled\n", BUTTON_PIN);
-    Serial.println("To enable button wake, use GPIO 0-5 (RTC GPIOs)");
-  }
-#endif
-
-  // Enable timer wake
   esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
 
-  // Enter deep sleep
   esp_deep_sleep_start();
   // This should never be reached
 }
