@@ -18,7 +18,6 @@
 // Replace with your actual 64-character hex device key
 #define HARDCODED_DEVICE_KEY "9ecc9ddc6e0329b045f97928d0bf406fddcc2df90f1cba83eab9616aa8447350"
 
-// Get unique device ID from ESP32 chip MAC address
 String getDeviceId()
 {
   uint8_t mac[6];
@@ -61,26 +60,21 @@ void goToDeepSleep();
 
 void setup()
 {
+  // turn LED on after wake
   pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
-
-  Serial.begin(115200);
+  digitalWrite(LED_PIN, HIGH);
 
   // Check wake reason
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
   bool buttonWake = false;
 
-  switch (wakeup_reason)
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO)
   {
-  case ESP_SLEEP_WAKEUP_GPIO:
+    digitalWrite(LED_PIN, LOW);
     buttonWake = true;
-    break;
-  case ESP_SLEEP_WAKEUP_TIMER:
-    break;
-  default:
-    Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason);
-    break;
   }
+
+  Serial.begin(115200);
 
   cycle_count++;
 
