@@ -11,10 +11,31 @@ void NVSStorage::end() {
 }
 
 bool NVSStorage::saveDeviceKey(const String& key) {
-  if (!begin()) return false;
-  bool result = preferences.putString("deviceKey", key);
-  end();
-  return result;
+  // Ensure preferences is closed first
+  preferences.end();
+  
+  // Open preferences for writing (readonly=false allows writing)
+  if (!preferences.begin("frame", false)) {
+    return false;
+  }
+  
+  // Save the key - putString returns the number of bytes written, or 0 on failure
+  // For a 64-char hex string, we expect at least 64 bytes written
+  size_t written = preferences.putString("deviceKey", key);
+  
+  // Force commit to ensure data is written
+  preferences.end();
+  
+  // Reopen to verify it was written
+  if (!preferences.begin("frame", true)) {  // readonly=true for verification
+    return false;
+  }
+  String verify = preferences.getString("deviceKey", "");
+  preferences.end();
+  
+  // Check if write was successful
+  bool success = (written >= key.length()) && (verify == key);
+  return success;
 }
 
 String NVSStorage::loadDeviceKey() {
@@ -32,23 +53,35 @@ bool NVSStorage::hasDeviceKey() {
 }
 
 bool NVSStorage::saveState(const DeviceState& state) {
-  if (!begin()) return false;
+  if (!begin()) {
+    return false;
+  }
   
-  preferences.putInt("currentImageIndex", state.currentImageIndex);
-  preferences.putInt("wakeCounter", state.wakeCounter);
-  preferences.putInt("slideshowVersion", state.slideshowVersion);
-  preferences.putInt("imageCount", state.imageCount);
+  // Save basic state
+  bool success = true;
+  success = success && preferences.putInt("currentImageIndex", state.currentImageIndex);
+  success = success && preferences.putInt("wakeCounter", state.wakeCounter);
+  success = success && preferences.putInt("slideshowVersion", state.slideshowVersion);
+  success = success && preferences.putInt("imageCount", state.imageCount);
   
-  // Save image IDs and hashes
+  // Save image IDs and hashes (only for images that exist)
   for (int i = 0; i < state.imageCount && i < 12; i++) {
     String idKey = "imageId" + String(i);
     String hashKey = "imageHash" + String(i);
-    preferences.putString(idKey.c_str(), state.imageIds[i]);
-    preferences.putString(hashKey.c_str(), state.imageHashes[i]);
+    success = success && preferences.putString(idKey.c_str(), state.imageIds[i]);
+    success = success && preferences.putString(hashKey.c_str(), state.imageHashes[i]);
+  }
+  
+  // Clear any old image entries beyond current count
+  for (int i = state.imageCount; i < 12; i++) {
+    String idKey = "imageId" + String(i);
+    String hashKey = "imageHash" + String(i);
+    preferences.remove(idKey.c_str());
+    preferences.remove(hashKey.c_str());
   }
   
   end();
-  return true;
+  return success;
 }
 
 bool NVSStorage::loadState(DeviceState& state) {

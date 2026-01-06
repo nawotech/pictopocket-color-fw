@@ -3,7 +3,6 @@
 #include <esp_wifi.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <HardwareSerial.h>
 #include "wifi_config.h"
 #include "config.h"
 #include "nvs_storage.h"
@@ -11,6 +10,11 @@
 #include "api_client.h"
 #include "EPD_4in0e.h"
 #include "DEV_Config.h"
+
+// TEMPORARY: Hardcoded device key for testing
+// TODO: Remove this and use NVS storage once upload/NVS preservation is fixed
+// Replace with your actual 64-character hex device key
+#define HARDCODED_DEVICE_KEY "9ecc9ddc6e0329b045f97928d0bf406fddcc2df90f1cba83eab9616aa8447350"
 
 // Get unique device ID from ESP32 chip MAC address
 String getDeviceId()
@@ -48,6 +52,7 @@ RTC_DATA_ATTR bool has_saved_ip = false;
 // Global state
 DeviceState deviceState;
 bool displayInitialized = false;
+String globalDeviceKey = ""; // Device key loaded in setup(), used throughout
 
 // Function declarations
 bool connectWiFi();
@@ -58,6 +63,35 @@ bool downloadAndStoreImages(const SlideshowManifestResponse &manifest);
 
 void setup()
 {
+  // CRITICAL: Initialize Serial FIRST before anything else
+  // For ESP32-C3 with USB CDC, this must be done early
+  Serial.begin(115200);
+
+  // Wait for USB CDC to be ready (ESP32-C3 with USB CDC)
+  // This is critical - without it, Serial output may not appear
+  // Note: Serial may return false immediately after boot, so we wait up to 3 seconds
+  unsigned long startWait = millis();
+  while (!Serial && (millis() - startWait < 3000))
+  {
+    delay(10);
+  }
+
+  // Additional delay to ensure USB CDC is fully initialized
+  delay(500);
+
+  // Force flush to ensure output buffer is clear
+  Serial.flush();
+  delay(100);
+
+  // Print test pattern immediately to verify Serial is working
+  Serial.println("\n\n");
+  Serial.println("========================================");
+  Serial.println("E-Ink Photo Frame - Wake Cycle");
+  Serial.println("========================================");
+  Serial.println("If you see this, Serial is working!");
+  Serial.flush();
+  delay(200);
+
 // With -DARDUINO_USB_CDC_ON_BOOT=1, Serial uses USB CDC, not hardware UART
 // Hardware UART pins (GPIO20/RX, GPIO21/TX) are free for GPIO use
 // No need to explicitly disable UART - it's not used when USB CDC is enabled
@@ -66,140 +100,267 @@ void setup()
 #ifdef LED_PIN
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);
+  Serial.println("LED pin initialized");
 #endif
 
 // Initialize button pin (if available - defined in platformio.ini build_flags)
 #ifdef BUTTON_PIN
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  Serial.println("Button pin initialized");
 #endif
 
   cycle_count++;
+  Serial.printf("Wake cycle #%d\n", cycle_count);
+  Serial.flush();
+
+  // Test pattern to verify Serial is working
+  Serial.println("TEST: Serial output working!");
+  Serial.flush();
+  delay(100);
 
   // Initialize NVS storage
+  Serial.println("\n--- Initializing NVS storage ---");
   if (!NVSStorage::begin())
   {
-    // Serial.println("Failed to initialize NVS");
+    Serial.println("ERROR: Failed to initialize NVS!");
+    Serial.println("Going to sleep...");
     // If NVS fails, we can't continue - go to sleep
     esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
     esp_deep_sleep_start();
     return;
   }
+  Serial.println("✓ NVS initialized");
 
   // Load device state
+  Serial.println("\n--- Loading device state ---");
   if (!NVSStorage::loadState(deviceState))
   {
     // First boot - initialize state
+    Serial.println("First boot - initializing default state");
     deviceState.currentImageIndex = 0;
     deviceState.wakeCounter = 0;
     deviceState.slideshowVersion = 0;
     deviceState.imageCount = 0;
   }
+  else
+  {
+    Serial.printf("Loaded state: imageIndex=%d, wakeCounter=%d, slideshowVersion=%d, imageCount=%d\n",
+                  deviceState.currentImageIndex, deviceState.wakeCounter,
+                  deviceState.slideshowVersion, deviceState.imageCount);
+  }
 
   // Load device key
-  String deviceKey = NVSStorage::loadDeviceKey();
+  Serial.println("\n--- Loading device key ---");
+
+  // TEMPORARY: Try NVS first, fallback to hardcoded key
+  String deviceKey = "";
+  bool usingHardcodedKey = false;
+
+  // Try to load from NVS first
+  bool keyExists = NVSStorage::hasDeviceKey();
+  Serial.printf("NVS key exists check: %s\n", keyExists ? "YES" : "NO");
+
+  if (keyExists)
+  {
+    deviceKey = NVSStorage::loadDeviceKey();
+    Serial.printf("Key loaded from NVS, length: %d\n", deviceKey.length());
+  }
+
+  // Fallback to hardcoded key if NVS doesn't have one
   if (deviceKey.length() == 0)
   {
-    // Serial.println("No device key found! Device must be configured first.");
-    // Go to sleep - device needs to be configured
+    Serial.println("WARNING: No key in NVS, using hardcoded key (TEMPORARY)");
+    Serial.println("TODO: Fix NVS preservation during upload");
+    deviceKey = String(HARDCODED_DEVICE_KEY);
+    usingHardcodedKey = true;
+  }
+
+  // Verify key format (should be 64 hex characters)
+  if (deviceKey.length() != 64)
+  {
+    Serial.printf("ERROR: Device key length is %d, expected 64\n", deviceKey.length());
+    Serial.println("Going to sleep...");
     NVSStorage::end();
     esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
     esp_deep_sleep_start();
     return;
   }
 
+  Serial.printf("✓ Device key loaded successfully (length: %d)\n", deviceKey.length());
+  Serial.printf("Source: %s\n", usingHardcodedKey ? "HARDCODED (temporary)" : "NVS");
+  Serial.printf("Key preview (first 10 chars): ");
+  for (int i = 0; i < 10 && i < deviceKey.length(); i++)
+  {
+    Serial.print(deviceKey.charAt(i));
+  }
+  Serial.println();
+
+  // Store device key globally for use in other functions
+  globalDeviceKey = deviceKey;
+
   // Initialize flash storage
+  Serial.println("\n--- Initializing flash storage ---");
   if (!FlashStorage::begin())
   {
-    // Serial.println("Failed to initialize flash storage");
+    Serial.println("ERROR: Failed to initialize flash storage!");
+    Serial.println("Going to sleep...");
     NVSStorage::end();
     esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
     esp_deep_sleep_start();
     return;
   }
+  Serial.printf("✓ Flash storage initialized (Free: %d bytes, Used: %d bytes)\n",
+                FlashStorage::getFreeSpace(), FlashStorage::getUsedSpace());
 
 // Check for button press (manual advance)
 #ifdef BUTTON_PIN
+  Serial.println("\n--- Checking button ---");
   if (digitalRead(BUTTON_PIN) == LOW)
   {
+    Serial.println("Button pressed - manual image advance");
     // Button pressed - advance to next image
     if (deviceState.imageCount > 0)
     {
       advanceToNextImage();
+      Serial.printf("Advanced to image index %d\n", deviceState.currentImageIndex);
       displayCurrentImage();
       // Save state
       NVSStorage::saveState(deviceState);
     }
+    else
+    {
+      Serial.println("No images available to display");
+    }
     // Go back to sleep
+    Serial.println("Going to sleep...");
     NVSStorage::end();
     FlashStorage::end();
     esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
     esp_deep_sleep_start();
     return;
   }
+  Serial.println("No button press");
 #endif
 
   // Get device ID from chip MAC address
   String deviceId = getDeviceId();
+  Serial.printf("\n--- Device ID: %s ---\n", deviceId.c_str());
 
   // Connect to WiFi
+  Serial.println("\n--- Connecting to WiFi ---");
   if (!connectWiFi())
   {
+    Serial.println("ERROR: WiFi connection failed!");
     // WiFi connection failed - display current image if available and go to sleep
     if (deviceState.imageCount > 0)
     {
+      Serial.println("Displaying current image before sleep...");
       displayCurrentImage();
     }
+    Serial.println("Going to sleep...");
     NVSStorage::end();
     FlashStorage::end();
     esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
     esp_deep_sleep_start();
     return;
   }
+  Serial.printf("✓ WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
   // Check for new slideshow version
+  Serial.println("\n--- Checking for new slideshow ---");
+  Serial.printf("Current slideshow version: %d\n", deviceState.slideshowVersion);
   SlideshowVersionResponse versionResponse;
-  if (APIClient::getSlideshowVersion(deviceId, deviceKey, versionResponse))
+  if (APIClient::getSlideshowVersion(deviceId, globalDeviceKey, versionResponse))
   {
+    Serial.printf("Server slideshow version: %d, Status: %s\n",
+                  versionResponse.slideshowVersion, versionResponse.status.c_str());
     if (versionResponse.status == "NEW" && versionResponse.slideshowVersion > deviceState.slideshowVersion)
     {
+      Serial.println("NEW slideshow available! Downloading...");
       // New slideshow available - download it
       updateSlideshow();
+      Serial.println("✓ Slideshow update complete");
     }
+    else
+    {
+      Serial.println("No new slideshow available");
+    }
+  }
+  else
+  {
+    Serial.println("ERROR: Failed to check slideshow version");
   }
 
   // Increment wake counter
   deviceState.wakeCounter++;
+  Serial.printf("\n--- Wake counter: %d/%d ---\n", deviceState.wakeCounter, WAKES_PER_DAY);
 
   // Advance to next image every 6 wakes (24 hours)
   if (deviceState.wakeCounter >= WAKES_PER_DAY)
   {
+    Serial.println("24 hours passed - advancing to next image");
     deviceState.wakeCounter = 0;
     if (deviceState.imageCount > 0)
     {
       advanceToNextImage();
+      Serial.printf("Now showing image index %d\n", deviceState.currentImageIndex);
     }
   }
 
   // Display current image
+  Serial.println("\n--- Displaying image ---");
   if (deviceState.imageCount > 0)
   {
+    Serial.printf("Displaying image %d of %d\n", deviceState.currentImageIndex + 1, deviceState.imageCount);
     displayCurrentImage();
+    Serial.println("✓ Image displayed");
 
     // Acknowledge display if we just displayed a new slideshow
     if (deviceState.slideshowVersion > 0)
     {
-      APIClient::ackDisplayed(deviceId, deviceKey, deviceState.slideshowVersion);
+      Serial.printf("Acknowledging display of slideshow version %d\n", deviceState.slideshowVersion);
+      if (APIClient::ackDisplayed(deviceId, globalDeviceKey, deviceState.slideshowVersion))
+      {
+        Serial.println("✓ Display acknowledged");
+      }
+      else
+      {
+        Serial.println("ERROR: Failed to acknowledge display");
+      }
     }
+  }
+  else
+  {
+    Serial.println("No images to display");
   }
 
   // Save state
-  NVSStorage::saveState(deviceState);
+  Serial.println("\n--- Saving state ---");
+  Serial.printf("State to save: imageIndex=%d, wakeCounter=%d, slideshowVersion=%d, imageCount=%d\n",
+                deviceState.currentImageIndex, deviceState.wakeCounter, 
+                deviceState.slideshowVersion, deviceState.imageCount);
+  if (NVSStorage::saveState(deviceState))
+  {
+    Serial.println("✓ State saved");
+  }
+  else
+  {
+    Serial.println("ERROR: Failed to save state");
+    Serial.println("This might be due to NVS being full or corrupted");
+  }
 
   // Cleanup
   NVSStorage::end();
   FlashStorage::end();
 
   // Go to deep sleep for 4 hours
+  Serial.println("\n--- Going to deep sleep ---");
+  Serial.printf("Sleep duration: %d hours\n", WAKE_INTERVAL_HOURS);
+  Serial.println("========================================\n");
+  Serial.println("NOTE: After deep sleep, USB CDC may not work.");
+  Serial.println("You may need to manually reset the device to see Serial output again.");
+  Serial.flush(); // Ensure all output is sent before sleep
+  delay(500);     // Extra delay to ensure all output is sent
   esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
   esp_deep_sleep_start();
 }
@@ -211,6 +372,7 @@ void loop()
 
 bool connectWiFi()
 {
+  Serial.println("Initializing WiFi...");
   WiFi.mode(WIFI_STA);
   esp_wifi_set_ps(WIFI_PS_NONE);
   WiFi.setAutoReconnect(false);
@@ -221,6 +383,7 @@ bool connectWiFi()
   // Try to use saved IP configuration first
   if (has_saved_ip && saved_ip != 0)
   {
+    Serial.println("Trying saved IP configuration...");
     IPAddress ip(saved_ip);
     IPAddress gateway(saved_gateway);
     IPAddress subnet(saved_subnet);
@@ -231,10 +394,12 @@ bool connectWiFi()
     {
       if (has_saved_info && saved_channel > 0)
       {
+        Serial.printf("Connecting with saved channel %d and BSSID...\n", saved_channel);
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD, saved_channel, saved_bssid);
       }
       else
       {
+        Serial.println("Connecting with saved IP...");
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
       }
 
@@ -247,6 +412,11 @@ bool connectWiFi()
       if (WiFi.status() == WL_CONNECTED)
       {
         connection_success = true;
+        Serial.printf("Connected in %lu ms (saved IP method)\n", millis() - start_time);
+      }
+      else
+      {
+        Serial.println("Saved IP method failed, trying fallback...");
       }
     }
   }
@@ -254,6 +424,7 @@ bool connectWiFi()
   // Fallback: Try saved channel/BSSID method
   if (!connection_success)
   {
+    Serial.println("Trying fallback connection method...");
     if (has_saved_ip && saved_ip != 0)
     {
       IPAddress zero(0, 0, 0, 0);
@@ -262,10 +433,12 @@ bool connectWiFi()
 
     if (has_saved_info && saved_channel > 0)
     {
+      Serial.printf("Connecting with saved channel %d...\n", saved_channel);
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD, saved_channel, saved_bssid);
     }
     else
     {
+      Serial.println("Connecting with default method...");
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     }
 
@@ -280,6 +453,11 @@ bool connectWiFi()
     if (WiFi.status() == WL_CONNECTED)
     {
       connection_success = true;
+      Serial.printf("Connected in %lu ms (fallback method)\n", millis() - start_time);
+    }
+    else
+    {
+      Serial.printf("Connection failed after %lu ms\n", millis() - start_time);
     }
   }
 
@@ -317,21 +495,30 @@ bool connectWiFi()
 
 void updateSlideshow()
 {
-  String deviceKey = NVSStorage::loadDeviceKey();
+  Serial.println("\n--- Updating slideshow ---");
+  // Use global device key (loaded in setup with fallback to hardcoded)
+  String deviceKey = globalDeviceKey;
   String deviceId = getDeviceId();
 
   // Get slideshow manifest
+  Serial.println("Fetching slideshow manifest...");
   SlideshowManifestResponse manifest;
   if (!APIClient::getSlideshowManifest(deviceId, deviceKey, manifest))
   {
+    Serial.println("ERROR: Failed to get slideshow manifest");
     return;
   }
+  Serial.printf("✓ Manifest received: %d images\n", manifest.imageCount);
 
   // Download and store images
+  Serial.println("Downloading images...");
   if (!downloadAndStoreImages(manifest))
   {
+    Serial.println("ERROR: Failed to download/store images");
+    Serial.println("Slideshow update incomplete - not updating device state");
     return;
   }
+  Serial.println("✓ All images downloaded and stored");
 
   // Update device state
   deviceState.slideshowVersion = manifest.slideshowVersion;
@@ -343,64 +530,108 @@ void updateSlideshow()
   }
   deviceState.currentImageIndex = 0; // Reset to first image
   deviceState.wakeCounter = 0;       // Reset wake counter
+  Serial.println("✓ Device state updated");
 }
 
 bool downloadAndStoreImages(const SlideshowManifestResponse &manifest)
 {
-  String deviceKey = NVSStorage::loadDeviceKey();
+  // Use global device key (loaded in setup with fallback to hardcoded)
+  String deviceKey = globalDeviceKey;
   String deviceId = getDeviceId();
 
   // Get signed URLs
+  Serial.println("Requesting signed URLs...");
   SignedUrlsResponse urlsResponse;
   if (!APIClient::getSignedUrls(deviceId, deviceKey, manifest.imageIds, manifest.imageCount, urlsResponse))
   {
+    Serial.println("ERROR: Failed to get signed URLs");
     return false;
   }
+  Serial.printf("✓ Received %d signed URLs\n", urlsResponse.count);
 
   // Download each image
+  // Check available heap memory first
+  size_t freeHeap = ESP.getFreeHeap();
+  Serial.printf("Available heap: %d bytes, Need: %d bytes\n", freeHeap, IMAGE_SIZE_BYTES);
+  
+  if (freeHeap < IMAGE_SIZE_BYTES + 10000) {  // Leave some headroom
+    Serial.printf("ERROR: Insufficient heap memory! Need %d bytes, have %d bytes\n", 
+                  IMAGE_SIZE_BYTES, freeHeap);
+    return false;
+  }
+  
   uint8_t *imageBuffer = (uint8_t *)malloc(IMAGE_SIZE_BYTES);
   if (!imageBuffer)
   {
+    Serial.printf("ERROR: Failed to allocate image buffer (%d bytes)\n", IMAGE_SIZE_BYTES);
+    Serial.printf("Free heap after failed allocation: %d bytes\n", ESP.getFreeHeap());
     return false;
   }
+  Serial.printf("✓ Image buffer allocated successfully\n");
 
   // Clear old images
+  Serial.println("Clearing old images from flash...");
   FlashStorage::clearAllImages();
 
   bool allSuccess = true;
   for (int i = 0; i < manifest.imageCount && i < 12; i++)
   {
+    Serial.printf("Downloading image %d/%d (ID: %s)...\n", i + 1, manifest.imageCount, manifest.imageIds[i].c_str());
+
     if (urlsResponse.urls[i].length() == 0)
     {
       // Missing URL for this image
+      Serial.printf("ERROR: Missing URL for image %d\n", i);
       allSuccess = false;
       continue;
     }
 
     size_t bytesDownloaded = 0;
+    unsigned long downloadStart = millis();
     if (APIClient::downloadImage(urlsResponse.urls[i], imageBuffer, IMAGE_SIZE_BYTES, bytesDownloaded))
     {
+      unsigned long downloadTime = millis() - downloadStart;
+      Serial.printf("Downloaded %d bytes in %lu ms\n", bytesDownloaded, downloadTime);
+
       if (bytesDownloaded == IMAGE_SIZE_BYTES)
       {
         // Verify hash (optional but recommended)
         // For now, just store it
+        Serial.printf("Saving image %d to flash...\n", i);
         if (!FlashStorage::saveImage(i, imageBuffer, IMAGE_SIZE_BYTES))
         {
+          Serial.printf("ERROR: Failed to save image %d to flash\n", i);
           allSuccess = false;
+        }
+        else
+        {
+          Serial.printf("✓ Image %d saved successfully\n", i);
         }
       }
       else
       {
+        Serial.printf("ERROR: Image %d size mismatch (expected %d, got %d)\n", i, IMAGE_SIZE_BYTES, bytesDownloaded);
         allSuccess = false;
       }
     }
     else
     {
+      Serial.printf("ERROR: Failed to download image %d\n", i);
       allSuccess = false;
     }
   }
 
   free(imageBuffer);
+
+  if (allSuccess)
+  {
+    Serial.printf("✓ Successfully downloaded and stored all %d images\n", manifest.imageCount);
+  }
+  else
+  {
+    Serial.println("ERROR: Some images failed to download or store");
+  }
+
   return allSuccess;
 }
 
@@ -408,34 +639,46 @@ void displayCurrentImage()
 {
   if (deviceState.imageCount == 0)
   {
+    Serial.println("No images to display");
     return;
   }
 
   // Initialize display if not already done
   if (!displayInitialized)
   {
+    Serial.println("Initializing display...");
     DEV_Module_Init();
     EPD_4IN0E_Init();
     displayInitialized = true;
+    Serial.println("✓ Display initialized");
   }
 
   // Load image from flash
+  Serial.printf("Loading image %d from flash...\n", deviceState.currentImageIndex);
   uint8_t *imageBuffer = (uint8_t *)malloc(IMAGE_SIZE_BYTES);
   if (!imageBuffer)
   {
+    Serial.println("ERROR: Failed to allocate image buffer");
     return;
   }
 
   if (FlashStorage::loadImage(deviceState.currentImageIndex, imageBuffer, IMAGE_SIZE_BYTES))
   {
+    Serial.println("Image loaded, sending to display...");
     // Display image
     EPD_4IN0E_Display(imageBuffer);
+    Serial.println("✓ Image sent to display");
+  }
+  else
+  {
+    Serial.printf("ERROR: Failed to load image %d from flash\n", deviceState.currentImageIndex);
   }
 
   free(imageBuffer);
 
   // Put display to sleep
   EPD_4IN0E_Sleep();
+  Serial.println("Display put to sleep");
 }
 
 void advanceToNextImage()

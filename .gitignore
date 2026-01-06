@@ -6,3 +6,4 @@
 
 # WiFi configuration with sensitive credentials
 include/wifi_config.h
+src/wifi_config.cpp

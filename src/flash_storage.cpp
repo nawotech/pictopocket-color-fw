@@ -6,7 +6,10 @@ bool FlashStorage::initialized = false;
 bool FlashStorage::begin() {
   if (initialized) return true;
   
-  if (!LittleFS.begin(true)) {  // true = format if mount fails
+  // Initialize LittleFS with the partition label "storage"
+  // begin(formatOnFail, basePath, maxOpenFiles, partitionLabel)
+  // partitionLabel defaults to "spiffs" but we need "storage"
+  if (!LittleFS.begin(true, "/littlefs", 10, STORAGE_PARTITION_LABEL)) {  // true = format if mount fails
     return false;
   }
   
