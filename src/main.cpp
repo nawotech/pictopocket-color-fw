@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_sleep.h>
+#include <driver/gpio.h>
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include "wifi_config.h"
@@ -60,6 +62,7 @@ void updateSlideshow();
 bool displayCurrentImage();
 void advanceToNextImage();
 bool downloadAndStoreImages(const SlideshowManifestResponse &manifest);
+void goToDeepSleep();
 
 void setup()
 {
@@ -99,14 +102,31 @@ void setup()
 // LED pin (defined in platformio.ini build_flags)
 #ifdef LED_PIN
   pinMode(LED_PIN, OUTPUT);
+  // Blink LED to indicate wake from sleep
   digitalWrite(LED_PIN, HIGH);
-  Serial.println("LED pin initialized");
+  delay(100);
+  digitalWrite(LED_PIN, LOW);
+  delay(100);
+  digitalWrite(LED_PIN, HIGH);
+  delay(100);
+  digitalWrite(LED_PIN, LOW);
+  Serial.println("LED pin initialized (blinked to show wake)");
 #endif
 
 // Initialize button pin (if available - defined in platformio.ini build_flags)
 #ifdef BUTTON_PIN
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  Serial.println("Button pin initialized");
+  Serial.printf("Button pin initialized on GPIO %d\n", BUTTON_PIN);
+  // ESP32-C3: Only GPIOs 0-5 are RTC GPIOs and can wake from deep sleep
+  if (BUTTON_PIN < 0 || BUTTON_PIN > 5)
+  {
+    Serial.println("WARNING: Button pin is NOT an RTC GPIO (must be 0-5 for deep sleep wake)");
+    Serial.println("Button wake from deep sleep will NOT work with this pin!");
+  }
+  else
+  {
+    Serial.println("Button pin is an RTC GPIO - wake from deep sleep is supported");
+  }
 #endif
 
   cycle_count++;
@@ -118,20 +138,7 @@ void setup()
   Serial.flush();
   delay(100);
 
-  // Initialize NVS storage
-  Serial.println("\n--- Initializing NVS storage ---");
-  if (!NVSStorage::begin())
-  {
-    Serial.println("ERROR: Failed to initialize NVS!");
-    Serial.println("Going to sleep...");
-    // If NVS fails, we can't continue - go to sleep
-    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
-    esp_deep_sleep_start();
-    return;
-  }
-  Serial.println("✓ NVS initialized");
-
-  // Load device state
+  // Load device state (loadState handles its own begin()/end())
   Serial.println("\n--- Loading device state ---");
   if (!NVSStorage::loadState(deviceState))
   {
@@ -144,10 +151,46 @@ void setup()
   }
   else
   {
-    Serial.printf("Loaded state: imageIndex=%d, wakeCounter=%d, slideshowVersion=%d, imageCount=%d\n",
+    Serial.printf("✓ Loaded state: imageIndex=%d, wakeCounter=%d, slideshowVersion=%d, imageCount=%d\n",
                   deviceState.currentImageIndex, deviceState.wakeCounter,
                   deviceState.slideshowVersion, deviceState.imageCount);
+    // Debug: Verify slideshowVersion was loaded correctly
+    if (deviceState.slideshowVersion == 0 && deviceState.imageCount > 0)
+    {
+      Serial.println("WARNING: slideshowVersion is 0 but images exist - possible state corruption!");
+    }
   }
+
+  // Check for button press IMMEDIATELY after wake (before WiFi connection)
+  // This allows manual image advance without waiting for network operations
+#ifdef BUTTON_PIN
+  Serial.println("\n--- Checking button ---");
+  // Button is active low with INPUT_PULLUP, so LOW means pressed
+  if (digitalRead(BUTTON_PIN) == LOW)
+  {
+    Serial.println("Button pressed - manual image advance");
+    // Button pressed - advance to next image
+    if (deviceState.imageCount > 0)
+    {
+      advanceToNextImage();
+      Serial.printf("Advanced to image index %d\n", deviceState.currentImageIndex);
+      bool displaySuccess = displayCurrentImage();
+      if (displaySuccess)
+      {
+        // Save state after successful display
+        NVSStorage::saveState(deviceState);
+      }
+    }
+    else
+    {
+      Serial.println("No images available to display");
+    }
+    // Go back to sleep
+    goToDeepSleep();
+    return;
+  }
+  Serial.println("No button press");
+#endif
 
   // Load device key
   Serial.println("\n--- Loading device key ---");
@@ -180,9 +223,7 @@ void setup()
   {
     Serial.printf("ERROR: Device key length is %d, expected 64\n", deviceKey.length());
     Serial.println("Going to sleep...");
-    NVSStorage::end();
-    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
-    esp_deep_sleep_start();
+    goToDeepSleep();
     return;
   }
 
@@ -204,43 +245,11 @@ void setup()
   {
     Serial.println("ERROR: Failed to initialize flash storage!");
     Serial.println("Going to sleep...");
-    NVSStorage::end();
-    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
-    esp_deep_sleep_start();
+    goToDeepSleep();
     return;
   }
   Serial.printf("✓ Flash storage initialized (Free: %d bytes, Used: %d bytes)\n",
                 FlashStorage::getFreeSpace(), FlashStorage::getUsedSpace());
-
-// Check for button press (manual advance)
-#ifdef BUTTON_PIN
-  Serial.println("\n--- Checking button ---");
-  if (digitalRead(BUTTON_PIN) == LOW)
-  {
-    Serial.println("Button pressed - manual image advance");
-    // Button pressed - advance to next image
-    if (deviceState.imageCount > 0)
-    {
-      advanceToNextImage();
-      Serial.printf("Advanced to image index %d\n", deviceState.currentImageIndex);
-      displayCurrentImage();
-      // Save state
-      NVSStorage::saveState(deviceState);
-    }
-    else
-    {
-      Serial.println("No images available to display");
-    }
-    // Go back to sleep
-    Serial.println("Going to sleep...");
-    NVSStorage::end();
-    FlashStorage::end();
-    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
-    esp_deep_sleep_start();
-    return;
-  }
-  Serial.println("No button press");
-#endif
 
   // Get device ID from chip MAC address
   String deviceId = getDeviceId();
@@ -258,10 +267,7 @@ void setup()
       displayCurrentImage();
     }
     Serial.println("Going to sleep...");
-    NVSStorage::end();
-    FlashStorage::end();
-    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
-    esp_deep_sleep_start();
+    goToDeepSleep();
     return;
   }
   Serial.printf("✓ WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
@@ -270,6 +276,7 @@ void setup()
   Serial.println("\n--- Checking for new slideshow ---");
   Serial.printf("Current slideshow version: %d\n", deviceState.slideshowVersion);
   SlideshowVersionResponse versionResponse;
+  bool slideshowUpdated = false;
   if (APIClient::getSlideshowVersion(deviceId, globalDeviceKey, versionResponse))
   {
     Serial.printf("Server slideshow version: %d, Status: %s\n",
@@ -282,12 +289,14 @@ void setup()
       Serial.println("NEW slideshow available! Downloading...");
       // New slideshow available - download it
       updateSlideshow();
+      slideshowUpdated = true;
     }
     else if (versionResponse.status == "NEW" && versionResponse.slideshowVersion == deviceState.slideshowVersion)
     {
       // Status says NEW but versions match - might be a state sync issue, download anyway
       Serial.println("Status is NEW but versions match - re-downloading to sync state...");
       updateSlideshow();
+      slideshowUpdated = true;
     }
     else
     {
@@ -299,19 +308,54 @@ void setup()
     Serial.println("ERROR: Failed to check slideshow version");
   }
 
+  // Save state immediately after slideshow update to ensure slideshowVersion is persisted
+  if (slideshowUpdated)
+  {
+    Serial.println("\n--- Saving state after slideshow update ---");
+    Serial.printf("State to save: imageIndex=%d, wakeCounter=%d, slideshowVersion=%d, imageCount=%d\n",
+                  deviceState.currentImageIndex, deviceState.wakeCounter,
+                  deviceState.slideshowVersion, deviceState.imageCount);
+    // saveState() handles begin()/end() internally, but ensure it's closed first
+    NVSStorage::end();
+    if (NVSStorage::saveState(deviceState))
+    {
+      Serial.println("✓ State saved after slideshow update");
+      // Verify it was saved by loading it back
+      DeviceState verifyState;
+      if (NVSStorage::loadState(verifyState))
+      {
+        Serial.printf("✓ Verification: Loaded slideshowVersion=%d (expected %d)\n",
+                      verifyState.slideshowVersion, deviceState.slideshowVersion);
+        if (verifyState.slideshowVersion != deviceState.slideshowVersion)
+        {
+          Serial.println("ERROR: Slideshow version mismatch after save!");
+        }
+      }
+    }
+    else
+    {
+      Serial.println("ERROR: Failed to save state after slideshow update");
+    }
+  }
+
   // Increment wake counter
+  int oldWakeCounter = deviceState.wakeCounter;
   deviceState.wakeCounter++;
-  Serial.printf("\n--- Wake counter: %d/%d ---\n", deviceState.wakeCounter, WAKES_PER_DAY);
+  Serial.printf("\n--- Wake counter: %d -> %d/%d ---\n", oldWakeCounter, deviceState.wakeCounter, WAKES_PER_DAY);
 
   // Advance to next image every 6 wakes (24 hours)
+  bool imageAdvanced = false;
   if (deviceState.wakeCounter >= WAKES_PER_DAY)
   {
     Serial.println("24 hours passed - advancing to next image");
     deviceState.wakeCounter = 0;
     if (deviceState.imageCount > 0)
     {
+      int oldImageIndex = deviceState.currentImageIndex;
       advanceToNextImage();
-      Serial.printf("Now showing image index %d\n", deviceState.currentImageIndex);
+      imageAdvanced = true;
+      Serial.printf("Image advanced from %d to %d (of %d total)\n",
+                    oldImageIndex, deviceState.currentImageIndex, deviceState.imageCount);
     }
   }
 
@@ -404,20 +448,8 @@ void setup()
     }
   }
 
-  // Cleanup
-  NVSStorage::end();
-  FlashStorage::end();
-
-  // Go to deep sleep for 4 hours
-  Serial.println("\n--- Going to deep sleep ---");
-  Serial.printf("Sleep duration: %d hours\n", WAKE_INTERVAL_HOURS);
-  Serial.println("========================================\n");
-  Serial.println("NOTE: After deep sleep, USB CDC may not work.");
-  Serial.println("You may need to manually reset the device to see Serial output again.");
-  Serial.flush(); // Ensure all output is sent before sleep
-  delay(500);     // Extra delay to ensure all output is sent
-  esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
-  esp_deep_sleep_start();
+  // Go to deep sleep
+  goToDeepSleep();
 }
 
 void loop()
@@ -577,6 +609,8 @@ void updateSlideshow()
   Serial.println("✓ Slideshow update complete");
 
   // Update device state
+  Serial.printf("Updating device state: slideshowVersion %d -> %d\n",
+                deviceState.slideshowVersion, manifest.slideshowVersion);
   deviceState.slideshowVersion = manifest.slideshowVersion;
   deviceState.imageCount = manifest.imageCount;
   for (int i = 0; i < manifest.imageCount && i < 12; i++)
@@ -586,7 +620,8 @@ void updateSlideshow()
   }
   deviceState.currentImageIndex = 0; // Reset to first image
   deviceState.wakeCounter = 0;       // Reset wake counter
-  Serial.println("✓ Device state updated");
+  Serial.printf("✓ Device state updated: slideshowVersion=%d, imageCount=%d\n",
+                deviceState.slideshowVersion, deviceState.imageCount);
 }
 
 bool downloadAndStoreImages(const SlideshowManifestResponse &manifest)
@@ -751,9 +786,57 @@ void advanceToNextImage()
     return;
   }
 
+  int oldIndex = deviceState.currentImageIndex;
   deviceState.currentImageIndex++;
   if (deviceState.currentImageIndex >= deviceState.imageCount)
   {
     deviceState.currentImageIndex = 0; // Wrap around
   }
+  Serial.printf("Image advanced: %d -> %d (of %d total)\n",
+                oldIndex, deviceState.currentImageIndex, deviceState.imageCount);
+}
+
+void goToDeepSleep()
+{
+  Serial.println("\n--- Going to deep sleep ---");
+  Serial.printf("Sleep duration: %d hours\n", WAKE_INTERVAL_HOURS);
+
+  // Cleanup storage
+  NVSStorage::end();
+  FlashStorage::end();
+
+  // Turn off LED before sleep
+#ifdef LED_PIN
+  digitalWrite(LED_PIN, LOW);
+#endif
+
+  Serial.println("========================================\n");
+  Serial.println("NOTE: After deep sleep, USB CDC may not work.");
+  Serial.println("You may need to manually reset the device to see Serial output again.");
+  Serial.flush(); // Ensure all output is sent before sleep
+  delay(500);     // Extra delay to ensure all output is sent
+
+  // Enable button as wake source (active low) - only for RTC GPIOs
+#ifdef BUTTON_PIN
+  // ESP32-C3: Only RTC GPIOs (0-5) can wake from deep sleep
+  if (BUTTON_PIN >= 0 && BUTTON_PIN <= 5)
+  {
+    // ESP32-C3 uses gpio_wakeup API for external wake
+    gpio_wakeup_enable((gpio_num_t)BUTTON_PIN, GPIO_INTR_LOW_LEVEL);
+    esp_sleep_enable_gpio_wakeup();
+    Serial.printf("Button wake enabled (active low) on GPIO %d\n", BUTTON_PIN);
+  }
+  else
+  {
+    Serial.printf("WARNING: GPIO %d is not an RTC GPIO - button wake disabled\n", BUTTON_PIN);
+    Serial.println("To enable button wake, use GPIO 0-5 (RTC GPIOs)");
+  }
+#endif
+
+  // Enable timer wake
+  esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
+
+  // Enter deep sleep
+  esp_deep_sleep_start();
+  // This should never be reached
 }

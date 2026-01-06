@@ -127,13 +127,39 @@ bool NVSStorage::saveState(const DeviceState &state)
 bool NVSStorage::loadState(DeviceState &state)
 {
   if (!begin())
+  {
+    Serial.println("ERROR: NVS begin() failed in loadState()");
     return false;
+  }
+
+  // Check if state actually exists by checking if at least one key exists
+  // If no keys exist, this is a first boot
+  bool hasSsVer = preferences.isKey("ssVer");
+  bool hasImgIdx = preferences.isKey("imgIdx");
+  bool hasWakeCnt = preferences.isKey("wakeCnt");
+
+  Serial.printf("NVS key check: ssVer=%s, imgIdx=%s, wakeCnt=%s\n",
+                hasSsVer ? "YES" : "NO",
+                hasImgIdx ? "YES" : "NO",
+                hasWakeCnt ? "YES" : "NO");
+
+  if (!hasSsVer && !hasImgIdx && !hasWakeCnt)
+  {
+    // No state exists - this is a first boot
+    Serial.println("No state keys found in NVS - treating as first boot");
+    end();
+    return false;
+  }
 
   // NVS keys are limited to 15 characters on ESP32
   state.currentImageIndex = preferences.getInt("imgIdx", 0); // was "currentImageIndex"
   state.wakeCounter = preferences.getInt("wakeCnt", 0);      // was "wakeCounter"
   state.slideshowVersion = preferences.getInt("ssVer", 0);   // was "slideshowVersion"
   state.imageCount = preferences.getInt("imgCnt", 0);        // was "imageCount"
+
+  Serial.printf("Loaded from NVS: imgIdx=%d, wakeCnt=%d, ssVer=%d, imgCnt=%d\n",
+                state.currentImageIndex, state.wakeCounter,
+                state.slideshowVersion, state.imageCount);
 
   // Load image IDs and hashes
   for (int i = 0; i < state.imageCount && i < 12; i++)
