@@ -35,9 +35,9 @@ public:
   static bool getSignedUrls(const String& deviceId, const String& deviceKey, const String* imageIds, int count, SignedUrlsResponse& response);
   static bool ackDisplayed(const String& deviceId, const String& deviceKey, int slideshowVersion);
   static bool downloadImage(const String& signedUrl, uint8_t* buffer, size_t bufferSize, size_t& bytesDownloaded);
+  static String parseUrl(const String& url, String& host, String& path);
   
 private:
-  static String parseUrl(const String& url, String& host, String& path);
   static String calculateSHA256(const uint8_t* data, size_t length);
 };
 

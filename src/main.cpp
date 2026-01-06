@@ -337,8 +337,13 @@ void setup()
   // Save state
   Serial.println("\n--- Saving state ---");
   Serial.printf("State to save: imageIndex=%d, wakeCounter=%d, slideshowVersion=%d, imageCount=%d\n",
-                deviceState.currentImageIndex, deviceState.wakeCounter, 
+                deviceState.currentImageIndex, deviceState.wakeCounter,
                 deviceState.slideshowVersion, deviceState.imageCount);
+
+  // Ensure NVS is closed (it might be open from earlier operations)
+  NVSStorage::end();
+
+  // Try to save state
   if (NVSStorage::saveState(deviceState))
   {
     Serial.println("✓ State saved");
@@ -346,7 +351,22 @@ void setup()
   else
   {
     Serial.println("ERROR: Failed to save state");
-    Serial.println("This might be due to NVS being full or corrupted");
+    Serial.println("Possible causes:");
+    Serial.println("  - NVS partition full");
+    Serial.println("  - NVS corrupted");
+    Serial.println("  - Write operation failed");
+    Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
+
+    // Try to check if NVS can be opened at all
+    if (!NVSStorage::begin())
+    {
+      Serial.println("ERROR: Cannot open NVS - partition may be corrupted");
+    }
+    else
+    {
+      Serial.println("NVS can be opened, but write failed");
+      NVSStorage::end();
+    }
   }
 
   // Cleanup
@@ -519,6 +539,7 @@ void updateSlideshow()
     return;
   }
   Serial.println("✓ All images downloaded and stored");
+  Serial.println("✓ Slideshow update complete");
 
   // Update device state
   deviceState.slideshowVersion = manifest.slideshowVersion;
@@ -549,30 +570,11 @@ bool downloadAndStoreImages(const SlideshowManifestResponse &manifest)
   }
   Serial.printf("✓ Received %d signed URLs\n", urlsResponse.count);
 
-  // Download each image
-  // Check available heap memory first
-  size_t freeHeap = ESP.getFreeHeap();
-  Serial.printf("Available heap: %d bytes, Need: %d bytes\n", freeHeap, IMAGE_SIZE_BYTES);
-  
-  if (freeHeap < IMAGE_SIZE_BYTES + 10000) {  // Leave some headroom
-    Serial.printf("ERROR: Insufficient heap memory! Need %d bytes, have %d bytes\n", 
-                  IMAGE_SIZE_BYTES, freeHeap);
-    return false;
-  }
-  
-  uint8_t *imageBuffer = (uint8_t *)malloc(IMAGE_SIZE_BYTES);
-  if (!imageBuffer)
-  {
-    Serial.printf("ERROR: Failed to allocate image buffer (%d bytes)\n", IMAGE_SIZE_BYTES);
-    Serial.printf("Free heap after failed allocation: %d bytes\n", ESP.getFreeHeap());
-    return false;
-  }
-  Serial.printf("✓ Image buffer allocated successfully\n");
-
   // Clear old images
   Serial.println("Clearing old images from flash...");
   FlashStorage::clearAllImages();
 
+  // Download each image directly to flash (streaming, no large buffer needed)
   bool allSuccess = true;
   for (int i = 0; i < manifest.imageCount && i < 12; i++)
   {
@@ -586,42 +588,63 @@ bool downloadAndStoreImages(const SlideshowManifestResponse &manifest)
       continue;
     }
 
-    size_t bytesDownloaded = 0;
-    unsigned long downloadStart = millis();
-    if (APIClient::downloadImage(urlsResponse.urls[i], imageBuffer, IMAGE_SIZE_BYTES, bytesDownloaded))
-    {
-      unsigned long downloadTime = millis() - downloadStart;
-      Serial.printf("Downloaded %d bytes in %lu ms\n", bytesDownloaded, downloadTime);
+    // Stream directly to flash to avoid large RAM allocation
+    WiFiClientSecure client;
+    HTTPClient http;
+    client.setInsecure();
 
-      if (bytesDownloaded == IMAGE_SIZE_BYTES)
+    String host, path;
+    APIClient::parseUrl(urlsResponse.urls[i], host, path);
+
+    http.begin(client, host.c_str(), 443, path.c_str());
+    http.setTimeout(60000); // 60 second timeout for image download
+
+    unsigned long downloadStart = millis();
+    int httpCode = http.GET();
+
+    if (httpCode == 200)
+    {
+      size_t contentLength = http.getSize();
+      if (contentLength == IMAGE_SIZE_BYTES)
       {
-        // Verify hash (optional but recommended)
-        // For now, just store it
-        Serial.printf("Saving image %d to flash...\n", i);
-        if (!FlashStorage::saveImage(i, imageBuffer, IMAGE_SIZE_BYTES))
+        Stream *stream = http.getStreamPtr();
+        if (stream)
         {
-          Serial.printf("ERROR: Failed to save image %d to flash\n", i);
-          allSuccess = false;
+          Serial.printf("Streaming %d bytes directly to flash...\n", contentLength);
+          Serial.printf("Stream available: %d bytes\n", stream->available());
+
+          if (FlashStorage::saveImageFromStream(i, stream, contentLength))
+          {
+            unsigned long downloadTime = millis() - downloadStart;
+            Serial.printf("✓ Image %d downloaded and saved in %lu ms\n", i, downloadTime);
+          }
+          else
+          {
+            Serial.printf("ERROR: Failed to save image %d to flash\n", i);
+            Serial.printf("Stream available after failure: %d bytes\n", stream->available());
+            allSuccess = false;
+          }
         }
         else
         {
-          Serial.printf("✓ Image %d saved successfully\n", i);
+          Serial.printf("ERROR: Failed to get stream for image %d\n", i);
+          allSuccess = false;
         }
       }
       else
       {
-        Serial.printf("ERROR: Image %d size mismatch (expected %d, got %d)\n", i, IMAGE_SIZE_BYTES, bytesDownloaded);
+        Serial.printf("ERROR: Image %d size mismatch (expected %d, got %d)\n", i, IMAGE_SIZE_BYTES, contentLength);
         allSuccess = false;
       }
     }
     else
     {
-      Serial.printf("ERROR: Failed to download image %d\n", i);
+      Serial.printf("ERROR: HTTP %d for image %d\n", httpCode, i);
       allSuccess = false;
     }
-  }
 
-  free(imageBuffer);
+    http.end();
+  }
 
   if (allSuccess)
   {
@@ -655,12 +678,26 @@ void displayCurrentImage()
 
   // Load image from flash
   Serial.printf("Loading image %d from flash...\n", deviceState.currentImageIndex);
+
+  // Check available heap before allocation
+  size_t freeHeap = ESP.getFreeHeap();
+  Serial.printf("Free heap before allocation: %d bytes, Need: %d bytes\n", freeHeap, IMAGE_SIZE_BYTES);
+
+  if (freeHeap < IMAGE_SIZE_BYTES + 10000)
+  {
+    Serial.printf("ERROR: Insufficient heap! Need %d bytes, have %d bytes\n", IMAGE_SIZE_BYTES, freeHeap);
+    return;
+  }
+
   uint8_t *imageBuffer = (uint8_t *)malloc(IMAGE_SIZE_BYTES);
   if (!imageBuffer)
   {
-    Serial.println("ERROR: Failed to allocate image buffer");
+    Serial.printf("ERROR: Failed to allocate image buffer (%d bytes)\n", IMAGE_SIZE_BYTES);
+    Serial.printf("Free heap after failed allocation: %d bytes\n", ESP.getFreeHeap());
+    Serial.println("This might be due to heap fragmentation");
     return;
   }
+  Serial.printf("✓ Image buffer allocated (%d bytes)\n", IMAGE_SIZE_BYTES);
 
   if (FlashStorage::loadImage(deviceState.currentImageIndex, imageBuffer, IMAGE_SIZE_BYTES))
   {

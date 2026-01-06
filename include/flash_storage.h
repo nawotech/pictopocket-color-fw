@@ -16,6 +16,7 @@ public:
   
   // Image storage operations
   static bool saveImage(int index, const uint8_t* imageData, size_t imageSize);
+  static bool saveImageFromStream(int index, Stream* stream, size_t expectedSize);
   static bool loadImage(int index, uint8_t* imageData, size_t imageSize);
   static bool hasImage(int index);
   static bool deleteImage(int index);

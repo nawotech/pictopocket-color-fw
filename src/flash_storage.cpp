@@ -44,6 +44,78 @@ bool FlashStorage::saveImage(int index, const uint8_t* imageData, size_t imageSi
   return written == imageSize;
 }
 
+bool FlashStorage::saveImageFromStream(int index, Stream* stream, size_t expectedSize) {
+  if (!begin()) return false;
+  if (expectedSize != IMAGE_SIZE_BYTES) return false;
+  if (!stream) return false;
+  
+  String path = getImagePath(index);
+  File file = LittleFS.open(path, "w");
+  if (!file) {
+    return false;
+  }
+  
+  // Stream data in chunks to avoid large buffer allocation
+  const size_t chunkSize = 4096;  // 4KB chunks
+  uint8_t* chunkBuffer = (uint8_t*)malloc(chunkSize);
+  if (!chunkBuffer) {
+    file.close();
+    return false;
+  }
+  
+  size_t totalWritten = 0;
+  size_t bytesToRead = expectedSize;
+  unsigned long timeout = millis() + 60000;  // 60 second timeout
+  
+  // Read until we have all the data or timeout
+  while (bytesToRead > 0 && (millis() < timeout)) {
+    // Wait a bit if no data is available yet (data might be arriving)
+    if (stream->available() == 0) {
+      delay(10);
+      continue;
+    }
+    
+    size_t toRead = (bytesToRead < chunkSize) ? bytesToRead : chunkSize;
+    // Don't read more than what's available
+    if (toRead > (size_t)stream->available()) {
+      toRead = stream->available();
+    }
+    
+    if (toRead == 0) {
+      delay(10);
+      continue;
+    }
+    
+    size_t bytesRead = stream->readBytes((char*)chunkBuffer, toRead);
+    
+    if (bytesRead == 0) {
+      delay(10);
+      continue;
+    }
+    
+    size_t bytesWritten = file.write(chunkBuffer, bytesRead);
+    if (bytesWritten != bytesRead) {
+      free(chunkBuffer);
+      file.close();
+      return false;
+    }
+    
+    totalWritten += bytesWritten;
+    bytesToRead -= bytesWritten;
+  }
+  
+  free(chunkBuffer);
+  file.close();
+  
+  if (totalWritten != expectedSize) {
+    // Clean up partial file
+    LittleFS.remove(path);
+    return false;
+  }
+  
+  return true;
+}
+
 bool FlashStorage::loadImage(int index, uint8_t* imageData, size_t imageSize) {
   if (!begin()) return false;
   if (imageSize != IMAGE_SIZE_BYTES) return false;

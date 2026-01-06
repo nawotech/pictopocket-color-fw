@@ -228,3 +228,6 @@ bool APIClient::downloadImage(const String& signedUrl, uint8_t* buffer, size_t b
   return httpCode == 200 && bytesDownloaded > 0;
 }
 
+// Note: This function returns a stream, but the caller must keep the HTTPClient alive
+// For proper streaming, we'll do it inline in the download function instead
+
