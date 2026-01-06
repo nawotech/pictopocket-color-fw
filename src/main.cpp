@@ -4,6 +4,25 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include "wifi_config.h"
+#include "config.h"
+#include "nvs_storage.h"
+#include "flash_storage.h"
+#include "api_client.h"
+#include "EPD_4in0e.h"
+#include "DEV_Config.h"
+
+// Get unique device ID from ESP32 chip MAC address
+String getDeviceId() {
+  uint8_t mac[6];
+  // WiFi.macAddress() works even if WiFi is not connected
+  // Just need to set mode first
+  WiFi.mode(WIFI_STA);
+  WiFi.macAddress(mac);
+  char deviceId[32];
+  snprintf(deviceId, sizeof(deviceId), "%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(deviceId);
+}
 
 // Store WiFi info in RTC memory to speed up reconnection after deep sleep
 RTC_DATA_ATTR uint8_t saved_channel = 0;
@@ -19,262 +38,345 @@ RTC_DATA_ATTR uint32_t saved_dns1 = 0;
 RTC_DATA_ATTR uint32_t saved_dns2 = 0;
 RTC_DATA_ATTR bool has_saved_ip = false;
 
-// Stub function for handling new image
-void handleNewImage()
-{
-  // Serial.println("→ New image detected! (stub function)");
-  // TODO: Implement image download and display logic here
-  digitalWrite(LED_PIN, LOW);
-}
+// Button pin (if available - adjust based on your hardware)
+#define BUTTON_PIN 9  // Change this to your button GPIO pin
 
-// Check for new image from server
-bool checkForNewImage()
-{
-  WiFiClientSecure client;
-  HTTPClient http;
+// Global state
+DeviceState deviceState;
+bool displayInitialized = false;
 
-  // For HTTPS, we need to skip certificate validation (or add proper cert)
-  // This is fine for testing, but consider adding proper certificate validation for production
-  client.setInsecure();
+// Function declarations
+bool connectWiFi();
+void updateSlideshow();
+void displayCurrentImage();
+void advanceToNextImage();
+bool downloadAndStoreImages(const SlideshowManifestResponse& manifest);
 
-  // Parse the base URL (remove https:// if present)
-  String baseUrl = String(CHECK_IMAGE_URL);
-  if (baseUrl.startsWith("https://"))
-  {
-    baseUrl = baseUrl.substring(8); // Remove "https://"
-  }
-
-  // Extract host (everything before the first /)
-  int slashIndex = baseUrl.indexOf('/');
-  String host = slashIndex > 0 ? baseUrl.substring(0, slashIndex) : baseUrl;
-  String path = slashIndex > 0 ? baseUrl.substring(slashIndex) : "/";
-
-  // Add query parameter to path
-  path += "?frameId=" + String(FRAME_ID);
-
-  // Serial.print("Checking for new image: https://");
-  //  Serial.print(host);
-  // Serial.println(path);
-
-  // Use begin with host, port, and path separately for better parsing
-  http.begin(client, host.c_str(), 443, path.c_str());
-  http.setTimeout(10000); // 10 second timeout
-
-  unsigned long request_start = millis();
-  int httpResponseCode = http.GET();
-  unsigned long request_time = millis() - request_start;
-
-  // Serial.printf("HTTP Response: %d (took %lu ms)\n", httpResponseCode, request_time);
-
-  bool hasNewImage = false;
-
-  if (httpResponseCode == 200)
-  {
-    // Serial.println("✓ New image available!");
-    hasNewImage = true;
-  }
-  else if (httpResponseCode == 204)
-  {
-    // Serial.println("✓ No new image (204 No Content)");
-    hasNewImage = false;
-  }
-  else
-  {
-    // Serial.printf("✗ Unexpected response code: %d\n", httpResponseCode);
-    if (httpResponseCode < 0)
-    {
-      // Serial.printf("Error code: %d\n", httpResponseCode);
-    }
-    hasNewImage = false;
-  }
-
-  http.end();
-  return hasNewImage;
-}
-
-void setup()
-{
+void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, HIGH);
-  // Record wakeup time
-  unsigned long wakeup_time = millis();
-
-  // Serial.begin(115200);
-  //  Wait for serial to be ready (only on first boot, not after deep sleep)
-  //  if (cycle_count == 0)
-  //{
-  //   delay(2000);
-  //
-  //}
-
+  
+  // Initialize button pin (if available)
+  #ifdef BUTTON_PIN
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  #endif
+  
   cycle_count++;
-  // Serial.println("\n========================================");
-  // Serial.printf("Cycle #%d - Waking from deep sleep\n", cycle_count);
-  // Serial.println("========================================");
+  
+  // Initialize NVS storage
+  if (!NVSStorage::begin()) {
+    // Serial.println("Failed to initialize NVS");
+    // If NVS fails, we can't continue - go to sleep
+    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
+    esp_deep_sleep_start();
+    return;
+  }
+  
+  // Load device state
+  if (!NVSStorage::loadState(deviceState)) {
+    // First boot - initialize state
+    deviceState.currentImageIndex = 0;
+    deviceState.wakeCounter = 0;
+    deviceState.slideshowVersion = 0;
+    deviceState.imageCount = 0;
+  }
+  
+  // Load device key
+  String deviceKey = NVSStorage::loadDeviceKey();
+  if (deviceKey.length() == 0) {
+    // Serial.println("No device key found! Device must be configured first.");
+    // Go to sleep - device needs to be configured
+    NVSStorage::end();
+    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
+    esp_deep_sleep_start();
+    return;
+  }
+  
+  // Initialize flash storage
+  if (!FlashStorage::begin()) {
+    // Serial.println("Failed to initialize flash storage");
+    NVSStorage::end();
+    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
+    esp_deep_sleep_start();
+    return;
+  }
+  
+  // Check for button press (manual advance)
+  #ifdef BUTTON_PIN
+  if (digitalRead(BUTTON_PIN) == LOW) {
+    // Button pressed - advance to next image
+    if (deviceState.imageCount > 0) {
+      advanceToNextImage();
+      displayCurrentImage();
+      // Save state
+      NVSStorage::saveState(deviceState);
+    }
+    // Go back to sleep
+    NVSStorage::end();
+    FlashStorage::end();
+    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
+    esp_deep_sleep_start();
+    return;
+  }
+  #endif
+  
+  // Get device ID from chip MAC address
+  String deviceId = getDeviceId();
+  
+  // Connect to WiFi
+  if (!connectWiFi()) {
+    // WiFi connection failed - display current image if available and go to sleep
+    if (deviceState.imageCount > 0) {
+      displayCurrentImage();
+    }
+    NVSStorage::end();
+    FlashStorage::end();
+    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
+    esp_deep_sleep_start();
+    return;
+  }
+  
+  // Check for new slideshow version
+  SlideshowVersionResponse versionResponse;
+  if (APIClient::getSlideshowVersion(deviceId, deviceKey, versionResponse)) {
+    if (versionResponse.status == "NEW" && versionResponse.slideshowVersion > deviceState.slideshowVersion) {
+      // New slideshow available - download it
+      updateSlideshow();
+    }
+  }
+  
+  // Increment wake counter
+  deviceState.wakeCounter++;
+  
+  // Advance to next image every 6 wakes (24 hours)
+  if (deviceState.wakeCounter >= WAKES_PER_DAY) {
+    deviceState.wakeCounter = 0;
+    if (deviceState.imageCount > 0) {
+      advanceToNextImage();
+    }
+  }
+  
+  // Display current image
+  if (deviceState.imageCount > 0) {
+    displayCurrentImage();
+    
+    // Acknowledge display if we just displayed a new slideshow
+    if (deviceState.slideshowVersion > 0) {
+      APIClient::ackDisplayed(deviceId, deviceKey, deviceState.slideshowVersion);
+    }
+  }
+  
+  // Save state
+  NVSStorage::saveState(deviceState);
+  
+  // Cleanup
+  NVSStorage::end();
+  FlashStorage::end();
+  
+  // Go to deep sleep for 4 hours
+  esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_MICROSECONDS);
+  esp_deep_sleep_start();
+}
 
-  // Initialize WiFi
+void loop() {
+  // This should never be reached due to deep sleep
+}
+
+bool connectWiFi() {
   WiFi.mode(WIFI_STA);
-
-  // Disable power saving during connection for faster connection
   esp_wifi_set_ps(WIFI_PS_NONE);
-
-  // Configure WiFi for faster connection
   WiFi.setAutoReconnect(false);
-  WiFi.persistent(true); // Store credentials in flash
-
-  unsigned long connect_start = millis();
+  WiFi.persistent(true);
+  
   bool connection_success = false;
-
-  // Try to use saved IP configuration first (fastest method)
-  if (has_saved_ip && saved_ip != 0)
-  {
-    IPAddress ip;
-    ip = saved_ip;
-    IPAddress gateway;
-    gateway = saved_gateway;
-    IPAddress subnet;
-    subnet = saved_subnet;
-    IPAddress dns1;
-    dns1 = saved_dns1;
-    IPAddress dns2;
-    dns2 = saved_dns2;
-
-    // Configure static IP
-    if (WiFi.config(ip, gateway, subnet, dns1, dns2))
-    {
-      // Try connection with saved channel/BSSID if available
-      if (has_saved_info && saved_channel > 0)
-      {
+  
+  // Try to use saved IP configuration first
+  if (has_saved_ip && saved_ip != 0) {
+    IPAddress ip(saved_ip);
+    IPAddress gateway(saved_gateway);
+    IPAddress subnet(saved_subnet);
+    IPAddress dns1(saved_dns1);
+    IPAddress dns2(saved_dns2);
+    
+    if (WiFi.config(ip, gateway, subnet, dns1, dns2)) {
+      if (has_saved_info && saved_channel > 0) {
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD, saved_channel, saved_bssid);
-      }
-      else
-      {
+      } else {
         WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
       }
-
-      // Wait for connection with shorter timeout for static IP
+      
       unsigned long start_time = millis();
-      unsigned long static_timeout = 5000; // 5 second timeout for static IP
-
-      while (WiFi.status() != WL_CONNECTED && (millis() - start_time) < static_timeout)
-      {
+      while (WiFi.status() != WL_CONNECTED && (millis() - start_time) < 5000) {
         delay(10);
       }
-
-      if (WiFi.status() == WL_CONNECTED)
-      {
+      
+      if (WiFi.status() == WL_CONNECTED) {
         connection_success = true;
       }
     }
   }
-
-  // Fallback: Try saved channel/BSSID method if static IP failed or not available
-  if (!connection_success)
-  {
-    // Reset to DHCP if static IP was attempted
-    if (has_saved_ip && saved_ip != 0)
-    {
+  
+  // Fallback: Try saved channel/BSSID method
+  if (!connection_success) {
+    if (has_saved_ip && saved_ip != 0) {
       IPAddress zero(0, 0, 0, 0);
-      WiFi.config(zero, zero, zero, zero, zero); // Reset to DHCP
+      WiFi.config(zero, zero, zero, zero, zero);
     }
-
-    if (has_saved_info && saved_channel > 0)
-    {
+    
+    if (has_saved_info && saved_channel > 0) {
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD, saved_channel, saved_bssid);
-    }
-    else
-    {
+    } else {
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     }
-
-    // Wait for connection with timeout
-    unsigned long timeout = 30000; // 30 second timeout
+    
+    unsigned long timeout = 30000;
     unsigned long start_time = millis();
-
-    while (WiFi.status() != WL_CONNECTED && (millis() - start_time) < timeout)
-    {
+    
+    while (WiFi.status() != WL_CONNECTED && (millis() - start_time) < timeout) {
       delay(10);
     }
-
-    if (WiFi.status() == WL_CONNECTED)
-    {
+    
+    if (WiFi.status() == WL_CONNECTED) {
       connection_success = true;
     }
   }
-
-  unsigned long connect_end = millis();
-  unsigned long connection_time = connect_end - connect_start;
-  unsigned long total_wakeup_time = connect_end - wakeup_time;
-
-  // Serial.println();
-
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    // Serial.println("\n✓ Connected to WiFi!");
-    // Serial.printf("Connection time: %lu ms\n", connection_time);
-    // Serial.printf("Total wakeup time: %lu ms\n", total_wakeup_time);
-    // Serial.print("IP Address: ");
-    // Serial.println(WiFi.localIP());
-    // Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
-
-    // Save IP configuration for next wake cycle
+  
+  if (connection_success) {
+    // Save IP configuration
     IPAddress ip = WiFi.localIP();
-    IPAddress gateway = WiFi.gatewayIP();
-    IPAddress subnet = WiFi.subnetMask();
-    IPAddress dns1 = WiFi.dnsIP(0);
-    IPAddress dns2 = WiFi.dnsIP(1);
-
-    // Check if IP is valid (not 0.0.0.0)
-    if (ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0)
-    {
+    if (ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0) {
       saved_ip = ip;
-      saved_gateway = gateway;
-      saved_subnet = subnet;
-      saved_dns1 = dns1;
-      saved_dns2 = dns2;
+      saved_gateway = WiFi.gatewayIP();
+      saved_subnet = WiFi.subnetMask();
+      saved_dns1 = WiFi.dnsIP(0);
+      saved_dns2 = WiFi.dnsIP(1);
       has_saved_ip = true;
     }
-
-    // Save channel and BSSID for next wake cycle
+    
+    // Save channel and BSSID
     wifi_ap_record_t ap_info;
-    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK)
-    {
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
       saved_channel = ap_info.primary;
       memcpy(saved_bssid, ap_info.bssid, 6);
       has_saved_info = true;
-      // Serial.printf("Saved channel: %d, BSSID: %02X:%02X:%02X:%02X:%02X:%02X\n",
-      //               saved_channel,
-      //               saved_bssid[0], saved_bssid[1], saved_bssid[2],
-      //               saved_bssid[3], saved_bssid[4], saved_bssid[5]);
     }
-
-    // Check for new image
-    // Serial.println("\n--- Checking for new image ---");
-    if (checkForNewImage())
-    {
-      handleNewImage();
-    }
-  }
-  else
-  {
-    // Serial.println("\n✗ Connection failed!");
-    // Serial.printf("Timeout after: %lu ms\n", connection_time);
-    // Clear saved info if connection failed (will retry with DHCP next time)
+  } else {
     has_saved_info = false;
     has_saved_ip = false;
   }
-
-  // Serial.println("\nGoing to deep sleep for 10 seconds...");
-  // Serial.flush();
-
-  digitalWrite(LED_PIN, HIGH);
-
-  // Deep sleep for 10 seconds
-  esp_sleep_enable_timer_wakeup(10 * 1000000ULL); // 10 seconds in microseconds
-  esp_deep_sleep_start();
+  
+  return connection_success;
 }
 
-void loop()
-{
-  // This should never be reached due to deep sleep
+void updateSlideshow() {
+  String deviceKey = NVSStorage::loadDeviceKey();
+  String deviceId = getDeviceId();
+  
+  // Get slideshow manifest
+  SlideshowManifestResponse manifest;
+  if (!APIClient::getSlideshowManifest(deviceId, deviceKey, manifest)) {
+    return;
+  }
+  
+  // Download and store images
+  if (!downloadAndStoreImages(manifest)) {
+    return;
+  }
+  
+  // Update device state
+  deviceState.slideshowVersion = manifest.slideshowVersion;
+  deviceState.imageCount = manifest.imageCount;
+  for (int i = 0; i < manifest.imageCount && i < 12; i++) {
+    deviceState.imageIds[i] = manifest.imageIds[i];
+    deviceState.imageHashes[i] = manifest.imageHashes[i];
+  }
+  deviceState.currentImageIndex = 0;  // Reset to first image
+  deviceState.wakeCounter = 0;  // Reset wake counter
+}
+
+bool downloadAndStoreImages(const SlideshowManifestResponse& manifest) {
+  String deviceKey = NVSStorage::loadDeviceKey();
+  String deviceId = getDeviceId();
+  
+  // Get signed URLs
+  SignedUrlsResponse urlsResponse;
+  if (!APIClient::getSignedUrls(deviceId, deviceKey, manifest.imageIds, manifest.imageCount, urlsResponse)) {
+    return false;
+  }
+  
+  // Download each image
+  uint8_t* imageBuffer = (uint8_t*)malloc(IMAGE_SIZE_BYTES);
+  if (!imageBuffer) {
+    return false;
+  }
+  
+  // Clear old images
+  FlashStorage::clearAllImages();
+  
+  bool allSuccess = true;
+  for (int i = 0; i < manifest.imageCount && i < 12; i++) {
+    if (urlsResponse.urls[i].length() == 0) {
+      // Missing URL for this image
+      allSuccess = false;
+      continue;
+    }
+    
+    size_t bytesDownloaded = 0;
+    if (APIClient::downloadImage(urlsResponse.urls[i], imageBuffer, IMAGE_SIZE_BYTES, bytesDownloaded)) {
+      if (bytesDownloaded == IMAGE_SIZE_BYTES) {
+        // Verify hash (optional but recommended)
+        // For now, just store it
+        if (!FlashStorage::saveImage(i, imageBuffer, IMAGE_SIZE_BYTES)) {
+          allSuccess = false;
+        }
+      } else {
+        allSuccess = false;
+      }
+    } else {
+      allSuccess = false;
+    }
+  }
+  
+  free(imageBuffer);
+  return allSuccess;
+}
+
+void displayCurrentImage() {
+  if (deviceState.imageCount == 0) {
+    return;
+  }
+  
+  // Initialize display if not already done
+  if (!displayInitialized) {
+    DEV_Module_Init();
+    EPD_4IN0E_Init();
+    displayInitialized = true;
+  }
+  
+  // Load image from flash
+  uint8_t* imageBuffer = (uint8_t*)malloc(IMAGE_SIZE_BYTES);
+  if (!imageBuffer) {
+    return;
+  }
+  
+  if (FlashStorage::loadImage(deviceState.currentImageIndex, imageBuffer, IMAGE_SIZE_BYTES)) {
+    // Display image
+    EPD_4IN0E_Display(imageBuffer);
+  }
+  
+  free(imageBuffer);
+  
+  // Put display to sleep
+  EPD_4IN0E_Sleep();
+}
+
+void advanceToNextImage() {
+  if (deviceState.imageCount == 0) {
+    return;
+  }
+  
+  deviceState.currentImageIndex++;
+  if (deviceState.currentImageIndex >= deviceState.imageCount) {
+    deviceState.currentImageIndex = 0;  // Wrap around
+  }
 }

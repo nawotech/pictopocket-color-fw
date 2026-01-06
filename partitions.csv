@@ -1,7 +1,12 @@
 # Name,   Type, SubType, Offset,  Size,     Flags
 # Note: ESP32-C6 with 4MB flash
-# This partition table maximizes app space by removing OTA and filesystem
+# Partition layout:
+# - NVS: 24KB for device state and keys
+# - phy_init: 4KB for PHY calibration
+# - factory: 2.5MB for application code
+# - storage: 1.5MB for image storage (~12 images at 120KB each)
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 0x3F0000,
+factory,  app,  factory, 0x10000, 0x280000,
+storage,  data, spiffs,  0x290000, 0x170000,
 
