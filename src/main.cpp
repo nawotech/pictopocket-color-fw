@@ -61,6 +61,9 @@ void goToDeepSleep();
 
 void setup()
 {
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
   Serial.begin(115200);
 
   // Check wake reason
@@ -69,33 +72,17 @@ void setup()
 
   switch (wakeup_reason)
   {
-  case ESP_SLEEP_WAKEUP_GPIO: // ESP32-C3 GPIO wakeup
-    Serial.println("Wakeup caused by button (GPIO)");
+  case ESP_SLEEP_WAKEUP_GPIO:
     buttonWake = true;
     break;
   case ESP_SLEEP_WAKEUP_TIMER:
-    Serial.println("Wakeup caused by timer");
     break;
   default:
     Serial.printf("Wakeup was not caused by deep sleep: %d\n", wakeup_reason);
     break;
   }
 
-#ifdef LED_PIN
-  pinMode(LED_PIN, OUTPUT);
-  // Blink LED to indicate wake from sleep
-  digitalWrite(LED_PIN, HIGH);
-  delay(100);
-  digitalWrite(LED_PIN, LOW);
-  delay(100);
-  digitalWrite(LED_PIN, HIGH);
-  delay(100);
-  digitalWrite(LED_PIN, LOW);
-  Serial.println("LED pin initialized (blinked to show wake)");
-#endif
-
   cycle_count++;
-  Serial.printf("Wake cycle #%d\n", cycle_count);
 
   // Load device state (loadState handles its own begin()/end())
   Serial.println("\n--- Loading device state ---");
@@ -108,29 +95,15 @@ void setup()
     deviceState.slideshowVersion = 0;
     deviceState.imageCount = 0;
   }
-  else
-  {
-    Serial.printf("✓ Loaded state: imageIndex=%d, wakeCounter=%d, slideshowVersion=%d, imageCount=%d\n",
-                  deviceState.currentImageIndex, deviceState.wakeCounter,
-                  deviceState.slideshowVersion, deviceState.imageCount);
-    // Debug: Verify slideshowVersion was loaded correctly
-    if (deviceState.slideshowVersion == 0 && deviceState.imageCount > 0)
-    {
-      Serial.println("WARNING: slideshowVersion is 0 but images exist - possible state corruption!");
-    }
-  }
 
   // Handle button wake - advance image immediately (before WiFi connection)
   // This allows manual image advance without waiting for network operations
   if (buttonWake)
   {
-    Serial.println("\n--- Button wake detected ---");
     if (deviceState.imageCount > 0)
     {
       int oldImageIndex = deviceState.currentImageIndex;
       advanceToNextImage();
-      Serial.printf("Image advanced from %d to %d (of %d total)\n",
-                    oldImageIndex, deviceState.currentImageIndex, deviceState.imageCount);
       bool displaySuccess = displayCurrentImage();
       if (displaySuccess)
       {
@@ -142,13 +115,7 @@ void setup()
     {
       Serial.println("No images available to display");
     }
-    // Go back to sleep
-    goToDeepSleep();
-    return;
   }
-
-  // Load device key
-  Serial.println("\n--- Loading device key ---");
 
   // TEMPORARY: Try NVS first, fallback to hardcoded key
   String deviceKey = "";
