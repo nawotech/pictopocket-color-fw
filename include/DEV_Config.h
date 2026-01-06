@@ -44,14 +44,29 @@
 
 /**
  * GPIO config
+ * Pin definitions are set via build flags in platformio.ini
  **/
-#define EPD_SCK_PIN 23
-#define EPD_MOSI_PIN 22
-#define EPD_CS_PIN 18
-#define EPD_DC_PIN 20
-#define EPD_RST_PIN 1
-#define EPD_BUSY_PIN 19
-#define EPD_PWR_PIN 15
+#ifndef EPD_SCK_PIN
+#error "EPD_SCK_PIN must be defined in platformio.ini build_flags"
+#endif
+#ifndef EPD_MOSI_PIN
+#error "EPD_MOSI_PIN must be defined in platformio.ini build_flags"
+#endif
+#ifndef EPD_CS_PIN
+#error "EPD_CS_PIN must be defined in platformio.ini build_flags"
+#endif
+#ifndef EPD_DC_PIN
+#error "EPD_DC_PIN must be defined in platformio.ini build_flags"
+#endif
+#ifndef EPD_RST_PIN
+#error "EPD_RST_PIN must be defined in platformio.ini build_flags"
+#endif
+#ifndef EPD_BUSY_PIN
+#error "EPD_BUSY_PIN must be defined in platformio.ini build_flags"
+#endif
+#ifndef EPD_PWR_PIN
+#error "EPD_PWR_PIN must be defined in platformio.ini build_flags"
+#endif
 
 #define GPIO_PIN_SET 1
 #define GPIO_PIN_RESET 0

@@ -62,7 +62,8 @@ UBYTE DEV_Module_Init(void)
     // gpio
     GPIO_Config();
 
-    // serial printf
+    // Serial via USB CDC (enabled with -DARDUINO_USB_CDC_ON_BOOT=1)
+    // Hardware UART pins (GPIO20/21) are free for GPIO use
     Serial.begin(115200);
 
     // spi
