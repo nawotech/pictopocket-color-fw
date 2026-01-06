@@ -172,8 +172,10 @@ void setup()
     // Button pressed - advance to next image
     if (deviceState.imageCount > 0)
     {
+      int oldImageIndex = deviceState.currentImageIndex;
       advanceToNextImage();
-      Serial.printf("Advanced to image index %d\n", deviceState.currentImageIndex);
+      Serial.printf("Image advanced from %d to %d (of %d total)\n",
+                    oldImageIndex, deviceState.currentImageIndex, deviceState.imageCount);
       bool displaySuccess = displayCurrentImage();
       if (displaySuccess)
       {
@@ -272,6 +274,11 @@ void setup()
   }
   Serial.printf("✓ WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
+  // Track if we need to display (only when image changes)
+  bool needToDisplay = false;
+  bool newSlideshowDownloaded = false;
+  int previousImageIndex = deviceState.currentImageIndex;
+
   // Check for new slideshow version
   Serial.println("\n--- Checking for new slideshow ---");
   Serial.printf("Current slideshow version: %d\n", deviceState.slideshowVersion);
@@ -290,6 +297,8 @@ void setup()
       // New slideshow available - download it
       updateSlideshow();
       slideshowUpdated = true;
+      newSlideshowDownloaded = true;
+      needToDisplay = true; // New slideshow - must display
     }
     else if (versionResponse.status == "NEW" && versionResponse.slideshowVersion == deviceState.slideshowVersion)
     {
@@ -297,6 +306,8 @@ void setup()
       Serial.println("Status is NEW but versions match - re-downloading to sync state...");
       updateSlideshow();
       slideshowUpdated = true;
+      newSlideshowDownloaded = true;
+      needToDisplay = true; // New slideshow - must display
     }
     else
     {
@@ -354,13 +365,11 @@ void setup()
       int oldImageIndex = deviceState.currentImageIndex;
       advanceToNextImage();
       imageAdvanced = true;
+      needToDisplay = true; // Image changed - need to display
       Serial.printf("Image advanced from %d to %d (of %d total)\n",
                     oldImageIndex, deviceState.currentImageIndex, deviceState.imageCount);
     }
   }
-
-  // Display current image
-  Serial.println("\n--- Displaying image ---");
 
   // Check if we have images in flash even if state says we don't
   // This can happen if images were downloaded but state save failed previously
@@ -380,37 +389,54 @@ void setup()
       Serial.printf("Found %d images in flash! Updating state to match...\n", imagesInFlash);
       deviceState.imageCount = imagesInFlash;
       deviceState.currentImageIndex = 0;
+      needToDisplay = true; // Found images - need to display
       // Note: We don't have the imageIds/hashes in state, but we can still display
       // The next slideshow update will properly sync the state
     }
   }
 
-  if (deviceState.imageCount > 0)
+  // Only display if image changed (new slideshow or automatic advancement)
+  if (!needToDisplay)
   {
-    Serial.printf("Displaying image %d of %d\n", deviceState.currentImageIndex + 1, deviceState.imageCount);
-    bool displaySuccess = displayCurrentImage();
-
-    // Only acknowledge display if image was successfully sent to display
-    if (displaySuccess && deviceState.slideshowVersion > 0)
-    {
-      Serial.printf("Acknowledging display of slideshow version %d\n", deviceState.slideshowVersion);
-      if (APIClient::ackDisplayed(deviceId, globalDeviceKey, deviceState.slideshowVersion))
-      {
-        Serial.println("✓ Display acknowledged");
-      }
-      else
-      {
-        Serial.println("ERROR: Failed to acknowledge display");
-      }
-    }
-    else if (!displaySuccess)
-    {
-      Serial.println("ERROR: Display failed - not acknowledging");
-    }
+    Serial.println("\n--- No display needed (image unchanged) ---");
   }
   else
   {
-    Serial.println("No images to display");
+    Serial.println("\n--- Displaying image ---");
+
+    if (deviceState.imageCount > 0)
+    {
+      Serial.printf("Displaying image %d of %d\n", deviceState.currentImageIndex + 1, deviceState.imageCount);
+      bool displaySuccess = displayCurrentImage();
+
+      // Only acknowledge display if:
+      // 1. Display was successful
+      // 2. A new slideshow was downloaded (not just advancing through existing slideshow)
+      if (displaySuccess && newSlideshowDownloaded)
+      {
+        Serial.printf("Acknowledging display of new slideshow version %d\n", deviceState.slideshowVersion);
+        if (APIClient::ackDisplayed(deviceId, globalDeviceKey, deviceState.slideshowVersion))
+        {
+          Serial.println("✓ Display acknowledged");
+        }
+        else
+        {
+          Serial.println("ERROR: Failed to acknowledge display");
+        }
+      }
+      else if (!displaySuccess)
+      {
+        Serial.println("ERROR: Display failed - not acknowledging");
+      }
+      else if (!newSlideshowDownloaded)
+      {
+        Serial.println("No ACK needed (advancing through existing slideshow)");
+      }
+    }
+    else
+    {
+      Serial.println("No images to display");
+    }
   }
 
   // Save state
