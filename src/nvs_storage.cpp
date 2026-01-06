@@ -111,12 +111,13 @@ bool NVSStorage::saveState(const DeviceState &state)
   }
 
   // Clear any old image entries beyond current count
+  // Note: remove() will fail with NOT_FOUND if key doesn't exist - this is harmless
   for (int i = state.imageCount; i < 12; i++)
   {
     String idKey = "imgId" + String(i);     // was "imageId" + String(i)
     String hashKey = "imgHash" + String(i); // was "imageHash" + String(i)
-    preferences.remove(idKey.c_str());
-    preferences.remove(hashKey.c_str());
+    preferences.remove(idKey.c_str());      // Ignore NOT_FOUND errors - they're harmless
+    preferences.remove(hashKey.c_str());    // Ignore NOT_FOUND errors - they're harmless
   }
 
   end();

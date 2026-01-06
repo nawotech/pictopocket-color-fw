@@ -32,6 +32,7 @@
 #define __EPD_4IN0E_H_
 
 #include "DEV_Config.h"
+#include <FS.h>
 
 // Display resolution
 #define EPD_4IN0E_WIDTH       400
@@ -52,6 +53,7 @@ void EPD_4IN0E_Clear(UBYTE color);
 void EPD_4IN0E_Show7Block(void);
 void EPD_4IN0E_Show(void);
 void EPD_4IN0E_Display(const UBYTE *Image);
+bool EPD_4IN0E_DisplayFromFile(File &file, size_t imageSize);
 void EPD_4IN0E_DisplayPart(const UBYTE *Image, UWORD xstart, UWORD ystart, UWORD image_width, UWORD image_heigh);
 void EPD_4IN0E_Sleep(void);
 

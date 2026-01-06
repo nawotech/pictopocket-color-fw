@@ -57,7 +57,7 @@ String globalDeviceKey = ""; // Device key loaded in setup(), used throughout
 // Function declarations
 bool connectWiFi();
 void updateSlideshow();
-void displayCurrentImage();
+bool displayCurrentImage();
 void advanceToNextImage();
 bool downloadAndStoreImages(const SlideshowManifestResponse &manifest);
 
@@ -274,12 +274,20 @@ void setup()
   {
     Serial.printf("Server slideshow version: %d, Status: %s\n",
                   versionResponse.slideshowVersion, versionResponse.status.c_str());
-    if (versionResponse.status == "NEW" && versionResponse.slideshowVersion > deviceState.slideshowVersion)
+
+    // Download if server version is higher than our stored version
+    // This handles the case where images were downloaded but state wasn't saved
+    if (versionResponse.slideshowVersion > deviceState.slideshowVersion)
     {
       Serial.println("NEW slideshow available! Downloading...");
       // New slideshow available - download it
       updateSlideshow();
-      Serial.println("✓ Slideshow update complete");
+    }
+    else if (versionResponse.status == "NEW" && versionResponse.slideshowVersion == deviceState.slideshowVersion)
+    {
+      // Status says NEW but versions match - might be a state sync issue, download anyway
+      Serial.println("Status is NEW but versions match - re-downloading to sync state...");
+      updateSlideshow();
     }
     else
     {
@@ -309,14 +317,37 @@ void setup()
 
   // Display current image
   Serial.println("\n--- Displaying image ---");
+
+  // Check if we have images in flash even if state says we don't
+  // This can happen if images were downloaded but state save failed previously
+  if (deviceState.imageCount == 0)
+  {
+    Serial.println("State shows no images, checking flash storage...");
+    int imagesInFlash = 0;
+    for (int i = 0; i < MAX_IMAGES; i++)
+    {
+      if (FlashStorage::hasImage(i))
+      {
+        imagesInFlash++;
+      }
+    }
+    if (imagesInFlash > 0)
+    {
+      Serial.printf("Found %d images in flash! Updating state to match...\n", imagesInFlash);
+      deviceState.imageCount = imagesInFlash;
+      deviceState.currentImageIndex = 0;
+      // Note: We don't have the imageIds/hashes in state, but we can still display
+      // The next slideshow update will properly sync the state
+    }
+  }
+
   if (deviceState.imageCount > 0)
   {
     Serial.printf("Displaying image %d of %d\n", deviceState.currentImageIndex + 1, deviceState.imageCount);
-    displayCurrentImage();
-    Serial.println("✓ Image displayed");
+    bool displaySuccess = displayCurrentImage();
 
-    // Acknowledge display if we just displayed a new slideshow
-    if (deviceState.slideshowVersion > 0)
+    // Only acknowledge display if image was successfully sent to display
+    if (displaySuccess && deviceState.slideshowVersion > 0)
     {
       Serial.printf("Acknowledging display of slideshow version %d\n", deviceState.slideshowVersion);
       if (APIClient::ackDisplayed(deviceId, globalDeviceKey, deviceState.slideshowVersion))
@@ -327,6 +358,10 @@ void setup()
       {
         Serial.println("ERROR: Failed to acknowledge display");
       }
+    }
+    else if (!displaySuccess)
+    {
+      Serial.println("ERROR: Display failed - not acknowledging");
     }
   }
   else
@@ -658,12 +693,12 @@ bool downloadAndStoreImages(const SlideshowManifestResponse &manifest)
   return allSuccess;
 }
 
-void displayCurrentImage()
+bool displayCurrentImage()
 {
   if (deviceState.imageCount == 0)
   {
     Serial.println("No images to display");
-    return;
+    return false;
   }
 
   // Initialize display if not already done
@@ -676,46 +711,37 @@ void displayCurrentImage()
     Serial.println("✓ Display initialized");
   }
 
-  // Load image from flash
-  Serial.printf("Loading image %d from flash...\n", deviceState.currentImageIndex);
+  // Open image file from flash for streaming
+  Serial.printf("Opening image %d from flash for streaming...\n", deviceState.currentImageIndex);
+  File imageFile = FlashStorage::openImageFile(deviceState.currentImageIndex);
 
-  // Check available heap before allocation
-  size_t freeHeap = ESP.getFreeHeap();
-  Serial.printf("Free heap before allocation: %d bytes, Need: %d bytes\n", freeHeap, IMAGE_SIZE_BYTES);
-
-  if (freeHeap < IMAGE_SIZE_BYTES + 10000)
+  if (!imageFile)
   {
-    Serial.printf("ERROR: Insufficient heap! Need %d bytes, have %d bytes\n", IMAGE_SIZE_BYTES, freeHeap);
-    return;
+    Serial.printf("ERROR: Failed to open image %d from flash\n", deviceState.currentImageIndex);
+    return false;
   }
 
-  uint8_t *imageBuffer = (uint8_t *)malloc(IMAGE_SIZE_BYTES);
-  if (!imageBuffer)
-  {
-    Serial.printf("ERROR: Failed to allocate image buffer (%d bytes)\n", IMAGE_SIZE_BYTES);
-    Serial.printf("Free heap after failed allocation: %d bytes\n", ESP.getFreeHeap());
-    Serial.println("This might be due to heap fragmentation");
-    return;
-  }
-  Serial.printf("✓ Image buffer allocated (%d bytes)\n", IMAGE_SIZE_BYTES);
+  Serial.printf("✓ Image file opened (%d bytes)\n", imageFile.size());
+  Serial.println("Streaming image to display...");
 
-  if (FlashStorage::loadImage(deviceState.currentImageIndex, imageBuffer, IMAGE_SIZE_BYTES))
+  // Stream directly from file to display SPI
+  bool displaySuccess = EPD_4IN0E_DisplayFromFile(imageFile, IMAGE_SIZE_BYTES);
+  imageFile.close();
+
+  if (displaySuccess)
   {
-    Serial.println("Image loaded, sending to display...");
-    // Display image
-    EPD_4IN0E_Display(imageBuffer);
-    Serial.println("✓ Image sent to display");
+    Serial.println("✓ Image successfully sent to display");
   }
   else
   {
-    Serial.printf("ERROR: Failed to load image %d from flash\n", deviceState.currentImageIndex);
+    Serial.println("ERROR: Failed to send image to display");
   }
-
-  free(imageBuffer);
 
   // Put display to sleep
   EPD_4IN0E_Sleep();
   Serial.println("Display put to sleep");
+
+  return displaySuccess;
 }
 
 void advanceToNextImage()

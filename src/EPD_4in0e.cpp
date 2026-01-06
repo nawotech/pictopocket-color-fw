@@ -30,6 +30,7 @@
 ******************************************************************************/
 #include "EPD_4in0e.h"
 #include "Debug.h"
+#include <LittleFS.h>
 
 /******************************************************************************
 function :  Software reset
@@ -285,6 +286,63 @@ void EPD_4IN0E_Display(const UBYTE *Image)
         }
     }
     EPD_4IN0E_TurnOnDisplay();
+}
+
+/******************************************************************************
+function :  Stream image data from file directly to e-Paper display
+parameter:
+    file : File object opened for reading
+    imageSize : Expected size of image data in bytes
+returns: true if successful, false on error
+******************************************************************************/
+bool EPD_4IN0E_DisplayFromFile(File &file, size_t imageSize)
+{
+    if (!file) {
+        return false;
+    }
+    
+    if (file.size() != imageSize) {
+        return false;
+    }
+    
+    UWORD Width, Height;
+    Width = (EPD_4IN0E_WIDTH % 2 == 0)? (EPD_4IN0E_WIDTH / 2 ): (EPD_4IN0E_WIDTH / 2 + 1);
+    Height = EPD_4IN0E_HEIGHT;
+    
+    // Verify expected size matches display dimensions
+    size_t expectedSize = Width * Height;
+    if (imageSize != expectedSize) {
+        return false;
+    }
+    
+    EPD_4IN0E_SendCommand(0x10);
+    
+    size_t totalBytesRead = 0;
+    
+    // Read and send data row by row
+    for (UWORD j = 0; j < Height; j++) {
+        for (UWORD i = 0; i < Width; i++) {
+            // Read one byte at a time to match the original display logic
+            if (file.available() > 0) {
+                int byteRead = file.read();
+                if (byteRead == -1) {
+                    return false;  // Read error
+                }
+                EPD_4IN0E_SendData((UBYTE)byteRead);
+                totalBytesRead++;
+            } else {
+                return false;  // Unexpected EOF
+            }
+        }
+    }
+    
+    // Verify we read exactly the expected amount
+    if (totalBytesRead != imageSize) {
+        return false;
+    }
+    
+    EPD_4IN0E_TurnOnDisplay();
+    return true;
 }
 
 void EPD_4IN0E_DisplayPart(const UBYTE *Image, UWORD xstart, UWORD ystart, UWORD image_width, UWORD image_heigh)

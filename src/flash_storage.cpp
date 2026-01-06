@@ -141,6 +141,29 @@ bool FlashStorage::loadImage(int index, uint8_t* imageData, size_t imageSize) {
   return read == imageSize;
 }
 
+File FlashStorage::openImageFile(int index) {
+  if (!begin()) {
+    return File();
+  }
+  
+  String path = getImagePath(index);
+  if (!LittleFS.exists(path)) {
+    return File();
+  }
+  
+  File file = LittleFS.open(path, "r");
+  if (!file) {
+    return File();
+  }
+  
+  if (file.size() != IMAGE_SIZE_BYTES) {
+    file.close();
+    return File();
+  }
+  
+  return file;
+}
+
 bool FlashStorage::hasImage(int index) {
   if (!begin()) return false;
   String path = getImagePath(index);
