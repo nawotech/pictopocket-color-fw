@@ -128,7 +128,7 @@ bool NVSStorage::loadState(DeviceState &state)
 {
   if (!begin())
   {
-    Serial.println("ERROR: NVS begin() failed in loadState()");
+    // Serial.println("ERROR: NVS begin() failed in loadState()");
     return false;
   }
 
@@ -138,15 +138,15 @@ bool NVSStorage::loadState(DeviceState &state)
   bool hasImgIdx = preferences.isKey("imgIdx");
   bool hasWakeCnt = preferences.isKey("wakeCnt");
 
-  Serial.printf("NVS key check: ssVer=%s, imgIdx=%s, wakeCnt=%s\n",
-                hasSsVer ? "YES" : "NO",
-                hasImgIdx ? "YES" : "NO",
-                hasWakeCnt ? "YES" : "NO");
+  // Serial.printf("NVS key check: ssVer=%s, imgIdx=%s, wakeCnt=%s\n",
+  // hasSsVer ? "YES" : "NO",
+  //  hasImgIdx ? "YES" : "NO",
+  //  hasWakeCnt ? "YES" : "NO");
 
   if (!hasSsVer && !hasImgIdx && !hasWakeCnt)
   {
     // No state exists - this is a first boot
-    Serial.println("No state keys found in NVS - treating as first boot");
+    // Serial.println("No state keys found in NVS - treating as first boot");
     end();
     return false;
   }
@@ -157,9 +157,9 @@ bool NVSStorage::loadState(DeviceState &state)
   state.slideshowVersion = preferences.getInt("ssVer", 0);   // was "slideshowVersion"
   state.imageCount = preferences.getInt("imgCnt", 0);        // was "imageCount"
 
-  Serial.printf("Loaded from NVS: imgIdx=%d, wakeCnt=%d, ssVer=%d, imgCnt=%d\n",
-                state.currentImageIndex, state.wakeCounter,
-                state.slideshowVersion, state.imageCount);
+  // Serial.printf("Loaded from NVS: imgIdx=%d, wakeCnt=%d, ssVer=%d, imgCnt=%d\n",
+  // state.currentImageIndex, state.wakeCounter,
+  // state.slideshowVersion, state.imageCount);
 
   // Load image IDs and hashes
   for (int i = 0; i < state.imageCount && i < 12; i++)
