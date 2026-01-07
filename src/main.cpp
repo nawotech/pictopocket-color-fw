@@ -71,7 +71,7 @@ void setup()
   if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO)
   {
     digitalWrite(LED_PIN, LOW);
-    buttonWake = true;
+    buttonWake = false;
   }
 
   Serial.begin(115200);
@@ -410,55 +410,123 @@ bool connectWiFi()
   WiFi.persistent(true); // Store credentials in flash
 
   unsigned long connect_start = millis();
+  bool connection_success = false;
 
-  // Try to use saved channel and BSSID if available (faster reconnection)
-  if (has_saved_info && saved_channel > 0)
+  // Try to use saved IP configuration first (fastest method)
+  if (has_saved_ip && saved_ip != 0)
   {
-    Serial.println("Using saved WiFi channel and BSSID for faster connection...");
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD, saved_channel, saved_bssid);
+    Serial.println("Trying saved IP configuration...");
+    IPAddress ip;
+    ip = saved_ip;
+    IPAddress gateway;
+    gateway = saved_gateway;
+    IPAddress subnet;
+    subnet = saved_subnet;
+    IPAddress dns1;
+    dns1 = saved_dns1;
+    IPAddress dns2;
+    dns2 = saved_dns2;
+
+    // Configure static IP
+    if (WiFi.config(ip, gateway, subnet, dns1, dns2))
+    {
+      // Try connection with saved channel/BSSID if available
+      if (has_saved_info && saved_channel > 0)
+      {
+        Serial.printf("Connecting with saved IP, channel %d and BSSID...\n", saved_channel);
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD, saved_channel, saved_bssid);
+      }
+      else
+      {
+        Serial.println("Connecting with saved IP...");
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      }
+
+      // Wait for connection with shorter timeout for static IP
+      unsigned long start_time = millis();
+      unsigned long static_timeout = 5000; // 5 second timeout for static IP
+
+      while (WiFi.status() != WL_CONNECTED && (millis() - start_time) < static_timeout)
+      {
+        delay(10);
+      }
+
+      if (WiFi.status() == WL_CONNECTED)
+      {
+        connection_success = true;
+        Serial.printf("Connected in %lu ms (saved IP method)\n", millis() - start_time);
+      }
+      else
+      {
+        Serial.println("Saved IP method failed, trying fallback...");
+      }
+    }
   }
-  else
+
+  // Fallback: Try saved channel/BSSID method if static IP failed or not available
+  if (!connection_success)
   {
-    Serial.println("First connection - scanning for network...");
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  }
+    Serial.println("Trying fallback connection method...");
+    // Reset to DHCP if static IP was attempted
+    if (has_saved_ip && saved_ip != 0)
+    {
+      IPAddress zero(0, 0, 0, 0);
+      WiFi.config(zero, zero, zero, zero, zero); // Reset to DHCP
+    }
 
-  Serial.print("Connecting");
+    if (has_saved_info && saved_channel > 0)
+    {
+      Serial.printf("Connecting with saved channel %d and BSSID...\n", saved_channel);
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD, saved_channel, saved_bssid);
+    }
+    else
+    {
+      Serial.println("First connection - scanning for network...");
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    }
 
-  // Wait for connection with timeout
-  unsigned long timeout = 30000; // 30 second timeout
-  unsigned long start_time = millis();
+    // Wait for connection with timeout
+    unsigned long timeout = 30000; // 30 second timeout
+    unsigned long start_time = millis();
 
-  while (WiFi.status() != WL_CONNECTED && (millis() - start_time) < timeout)
-  {
-    Serial.print(".");
-    delay(100);
+    while (WiFi.status() != WL_CONNECTED && (millis() - start_time) < timeout)
+    {
+      delay(10);
+    }
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      connection_success = true;
+      Serial.printf("Connected in %lu ms (fallback method)\n", millis() - start_time);
+    }
   }
 
   unsigned long connect_end = millis();
   unsigned long connection_time = connect_end - connect_start;
 
-  Serial.println();
-
-  bool connection_success = false;
   if (WiFi.status() == WL_CONNECTED)
   {
-    connection_success = true;
     Serial.println("\n✓ Connected to WiFi!");
-    Serial.printf("Connection time: %lu ms\n", connection_time);
+    Serial.printf("Total connection time: %lu ms\n", connection_time);
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
     Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
 
-    // Save IP configuration
+    // Save IP configuration for next wake cycle
     IPAddress ip = WiFi.localIP();
+    IPAddress gateway = WiFi.gatewayIP();
+    IPAddress subnet = WiFi.subnetMask();
+    IPAddress dns1 = WiFi.dnsIP(0);
+    IPAddress dns2 = WiFi.dnsIP(1);
+
+    // Check if IP is valid (not 0.0.0.0)
     if (ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0)
     {
       saved_ip = ip;
-      saved_gateway = WiFi.gatewayIP();
-      saved_subnet = WiFi.subnetMask();
-      saved_dns1 = WiFi.dnsIP(0);
-      saved_dns2 = WiFi.dnsIP(1);
+      saved_gateway = gateway;
+      saved_subnet = subnet;
+      saved_dns1 = dns1;
+      saved_dns2 = dns2;
       has_saved_ip = true;
     }
 
@@ -479,7 +547,7 @@ bool connectWiFi()
   {
     Serial.println("\n✗ Connection failed!");
     Serial.printf("Timeout after: %lu ms\n", connection_time);
-    // Clear saved info if connection failed
+    // Clear saved info if connection failed (will retry with DHCP next time)
     has_saved_info = false;
     has_saved_ip = false;
   }
