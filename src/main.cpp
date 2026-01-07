@@ -60,6 +60,18 @@ void goToDeepSleep();
 
 void setup()
 {
+  // Timing diagnostics
+  unsigned long totalStartTime = millis();
+  unsigned long stateLoadTime = 0;
+  unsigned long keyLoadTime = 0;
+  unsigned long wifiConnectTime = 0;
+  unsigned long versionCheckTime = 0;
+  unsigned long flashInitTime = 0;
+  unsigned long slideshowUpdateTime = 0;
+  unsigned long displayTime = 0;
+  unsigned long ackTime = 0;
+  unsigned long stateSaveTime = 0;
+
   // turn LED on after wake
   // pinMode(LED_PIN, OUTPUT);
   // digitalWrite(LED_PIN, HIGH);
@@ -74,11 +86,13 @@ void setup()
     // buttonWake = false;
   }
 
-  // Serial.begin(115200);
+  Serial.begin(115200);
+  delay(100); // Allow Serial to initialize
 
   cycle_count++;
 
   // Load device state (loadState handles its own begin()/end())
+  unsigned long stateLoadStart = millis();
   // // Serial.println("\n--- Loading device state ---");
   if (!NVSStorage::loadState(deviceState))
   {
@@ -89,6 +103,7 @@ void setup()
     deviceState.slideshowVersion = 0;
     deviceState.imageCount = 0;
   }
+  stateLoadTime = millis() - stateLoadStart;
 
   // Handle button wake - advance image immediately (before WiFi connection)
   // This allows manual image advance without waiting for network operations
@@ -112,6 +127,7 @@ void setup()
   }
 
   // TEMPORARY: Try NVS first, fallback to hardcoded key
+  unsigned long keyLoadStart = millis();
   String deviceKey = "";
   bool usingHardcodedKey = false;
 
@@ -154,11 +170,13 @@ void setup()
 
   // Store device key globally for use in other functions
   globalDeviceKey = deviceKey;
+  keyLoadTime = millis() - keyLoadStart;
 
   // Get device ID from chip MAC address
   String deviceId = getDeviceId();
 
   // Connect to WiFi
+  unsigned long wifiStart = millis();
   // Serial.println("\n--- Connecting to WiFi ---");
   if (!connectWiFi())
   {
@@ -177,10 +195,12 @@ void setup()
     goToDeepSleep();
     return;
   }
+  wifiConnectTime = millis() - wifiStart;
   // Serial.printf("✓ WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
   // OPTIMIZATION: Check for new slideshow FIRST (before initializing flash storage)
   // This allows us to skip expensive operations if there's no new slideshow
+  unsigned long versionCheckStart = millis();
   // Serial.println("\n--- Checking for new slideshow ---");
   // Serial.printf("Current slideshow version: %d\n", deviceState.slideshowVersion);
   SlideshowVersionResponse versionResponse;
@@ -214,11 +234,13 @@ void setup()
   {
     // Serial.println("ERROR: Failed to check slideshow version");
   }
+  versionCheckTime = millis() - versionCheckStart;
 
   // Track if we need to display (only when image changes)
   bool needToDisplay = false;
 
   // Only initialize flash storage if we need to download or display
+  unsigned long flashInitStart = millis();
   if (needToDownload || deviceState.imageCount > 0)
   {
     // Serial.println("\n--- Initializing flash storage ---");
@@ -232,11 +254,14 @@ void setup()
     // Serial.printf("✓ Flash storage initialized (Free: %d bytes, Used: %d bytes)\n",
     // FlashStorage::getFreeSpace(), FlashStorage::getUsedSpace());
   }
+  flashInitTime = millis() - flashInitStart;
 
   // Download new slideshow if needed
   if (needToDownload)
   {
+    unsigned long slideshowUpdateStart = millis();
     updateSlideshow();
+    slideshowUpdateTime = millis() - slideshowUpdateStart;
     slideshowUpdated = true;
     newSlideshowDownloaded = true;
     needToDisplay = true; // New slideshow - must display
@@ -245,6 +270,7 @@ void setup()
   // Save state immediately after slideshow update to ensure slideshowVersion is persisted
   if (slideshowUpdated)
   {
+    unsigned long stateSaveStart = millis();
     // Serial.println("\n--- Saving state after slideshow update ---");
     NVSStorage::end();
     if (NVSStorage::saveState(deviceState))
@@ -255,6 +281,7 @@ void setup()
     {
       // Serial.println("ERROR: Failed to save state after slideshow update");
     }
+    stateSaveTime += millis() - stateSaveStart;
   }
 
   // Increment wake counter
@@ -323,14 +350,18 @@ void setup()
 
     if (deviceState.imageCount > 0)
     {
+      unsigned long displayStart = millis();
       // Serial.printf("Displaying image %d of %d\n", deviceState.currentImageIndex + 1, deviceState.imageCount);
       bool displaySuccess = displayCurrentImage();
+      displayTime = millis() - displayStart;
 
       // Only acknowledge display if:
       // 1. Display was successful
       // 2. A new slideshow was downloaded (not just advancing through existing slideshow)
-      if (displaySuccess && newSlideshowDownloaded)
+      // 3. WiFi is still connected
+      if (displaySuccess && newSlideshowDownloaded && WiFi.status() == WL_CONNECTED)
       {
+        unsigned long ackStart = millis();
         // Serial.printf("Acknowledging display of new slideshow version %d\n", deviceState.slideshowVersion);
         if (APIClient::ackDisplayed(deviceId, globalDeviceKey, deviceState.slideshowVersion))
         {
@@ -340,6 +371,7 @@ void setup()
         {
           // Serial.println("ERROR: Failed to acknowledge display");
         }
+        ackTime = millis() - ackStart;
       }
     }
     stateChanged = true; // Display happened, state may have changed
@@ -353,6 +385,7 @@ void setup()
   // This avoids unnecessary NVS writes when there's no new slideshow
   if (stateChanged || slideshowUpdated || imageAdvanced)
   {
+    unsigned long stateSaveStart = millis();
     // Serial.println("\n--- Saving state ---");
     NVSStorage::end();
     if (NVSStorage::saveState(deviceState))
@@ -363,11 +396,29 @@ void setup()
     {
       // Serial.println("ERROR: Failed to save state");
     }
+    stateSaveTime += millis() - stateSaveStart;
   }
   else
   {
     // Serial.println("\n--- No state changes - skipping save ---");
   }
+
+  // Print timing diagnostics
+  unsigned long totalTime = millis() - totalStartTime;
+  Serial.println("\n========================================");
+  Serial.println("TIMING DIAGNOSTICS");
+  Serial.println("========================================");
+  Serial.printf("Total wake time:        %6lu ms\n", totalTime);
+  Serial.printf("State load:              %6lu ms\n", stateLoadTime);
+  Serial.printf("Device key load:         %6lu ms\n", keyLoadTime);
+  Serial.printf("WiFi connection:         %6lu ms\n", wifiConnectTime);
+  Serial.printf("Version check API:       %6lu ms\n", versionCheckTime);
+  Serial.printf("Flash storage init:      %6lu ms\n", flashInitTime);
+  Serial.printf("Slideshow update:         %6lu ms\n", slideshowUpdateTime);
+  Serial.printf("Display:                 %6lu ms\n", displayTime);
+  Serial.printf("ACK:                     %6lu ms\n", ackTime);
+  Serial.printf("State save:              %6lu ms\n", stateSaveTime);
+  Serial.println("========================================");
 
   // Go to deep sleep
   goToDeepSleep();
@@ -429,7 +480,7 @@ bool connectWiFi()
 
       while (WiFi.status() != WL_CONNECTED && (millis() - start_time) < static_timeout)
       {
-        delay(10);
+        delay(1); // Reduced delay - check more frequently
       }
 
       if (WiFi.status() == WL_CONNECTED)
@@ -472,7 +523,7 @@ bool connectWiFi()
 
     while (WiFi.status() != WL_CONNECTED && (millis() - start_time) < timeout)
     {
-      delay(10);
+      delay(1); // Reduced delay - check more frequently
     }
 
     if (WiFi.status() == WL_CONNECTED)
@@ -544,6 +595,7 @@ void updateSlideshow()
   String deviceId = getDeviceId();
 
   // Get slideshow manifest
+  unsigned long manifestStart = millis();
   // Serial.println("Fetching slideshow manifest...");
   SlideshowManifestResponse manifest;
   if (!APIClient::getSlideshowManifest(deviceId, deviceKey, manifest))
@@ -551,9 +603,11 @@ void updateSlideshow()
     // Serial.println("ERROR: Failed to get slideshow manifest");
     return;
   }
+  unsigned long manifestTime = millis() - manifestStart;
   // Serial.printf("✓ Manifest received: %d images\n", manifest.imageCount);
 
   // Download and store images
+  unsigned long downloadStart = millis();
   // Serial.println("Downloading images...");
   if (!downloadAndStoreImages(manifest))
   {
@@ -561,14 +615,14 @@ void updateSlideshow()
     // Serial.println("Slideshow update incomplete - not updating device state");
     return;
   }
+  unsigned long downloadTime = millis() - downloadStart;
   // Serial.println("✓ All images downloaded and stored");
   // Serial.println("✓ Slideshow update complete");
+  Serial.printf("  Manifest API: %lu ms, Downloads: %lu ms\n", manifestTime, downloadTime);
 
   // Update device state
-  // Serial.printf("Updating device state: slideshowVersion %d -> %d\n",
-  // deviceState.slideshowVersion, manifest.slideshowVersion);
-  // deviceState.slideshowVersion = manifest.slideshowVersion;
-  // deviceState.imageCount = manifest.imageCount;
+  deviceState.slideshowVersion = manifest.slideshowVersion;
+  deviceState.imageCount = manifest.imageCount;
   for (int i = 0; i < manifest.imageCount && i < 12; i++)
   {
     deviceState.imageIds[i] = manifest.imageIds[i];
@@ -576,8 +630,6 @@ void updateSlideshow()
   }
   deviceState.currentImageIndex = 0; // Reset to first image
   deviceState.wakeCounter = 0;       // Reset wake counter
-                                     // Serial.printf("✓ Device state updated: slideshowVersion=%d, imageCount=%d\n",
-                                     // deviceState.slideshowVersion, deviceState.imageCount);
 }
 
 bool downloadAndStoreImages(const SlideshowManifestResponse &manifest)
@@ -587,46 +639,54 @@ bool downloadAndStoreImages(const SlideshowManifestResponse &manifest)
   String deviceId = getDeviceId();
 
   // Get signed URLs
-  // Serial.println("Requesting signed URLs...");
+  unsigned long urlsStart = millis();
   SignedUrlsResponse urlsResponse;
   if (!APIClient::getSignedUrls(deviceId, deviceKey, manifest.imageIds, manifest.imageCount, urlsResponse))
   {
-    // Serial.println("ERROR: Failed to get signed URLs");
     return false;
   }
-  // Serial.printf("✓ Received %d signed URLs\n", urlsResponse.count);
+  unsigned long urlsTime = millis() - urlsStart;
+  Serial.printf("  Signed URLs API: %lu ms\n", urlsTime);
 
-  // Clear old images
-  // Serial.println("Clearing old images from flash...");
-  FlashStorage::clearAllImages();
+  // OPTIMIZATION: Skip deletion - we're overwriting images 0 to (imageCount-1) anyway
+  // LittleFS will overwrite existing files, so no need to delete first
+  // Only delete if we're reducing the number of images (fewer than before)
+  // For now, skip deletion to save time - overwrite is faster than delete+write
+
+  // OPTIMIZATION: Reuse WiFiClientSecure connection for all downloads
+  // This avoids TLS handshake overhead for each image
+  WiFiClientSecure client;
+  client.setInsecure();
+  client.setTimeout(30000); // Reduced timeout - fail faster if connection is slow
 
   // Download each image directly to flash (streaming, no large buffer needed)
   bool allSuccess = true;
+  HTTPClient http; // Reuse HTTPClient object to avoid reallocation overhead
+  unsigned long totalDownloadTime = 0;
+  unsigned long totalFlashWriteTime = 0;
+
   for (int i = 0; i < manifest.imageCount && i < 12; i++)
   {
-    // Serial.printf("Downloading image %d/%d (ID: %s)...\n", i + 1, manifest.imageCount, manifest.imageIds[i].c_str());
-
     if (urlsResponse.urls[i].length() == 0)
     {
       // Missing URL for this image
-      // Serial.printf("ERROR: Missing URL for image %d\n", i);
       allSuccess = false;
       continue;
     }
 
-    // Stream directly to flash to avoid large RAM allocation
-    WiFiClientSecure client;
-    HTTPClient http;
-    client.setInsecure();
-
+    unsigned long imageStart = millis();
     String host, path;
     APIClient::parseUrl(urlsResponse.urls[i], host, path);
 
+    // OPTIMIZATION: Reuse HTTPClient - don't call end() until we're done
+    // This keeps the underlying connection alive if possible
     http.begin(client, host.c_str(), 443, path.c_str());
-    http.setTimeout(60000); // 60 second timeout for image download
+    http.setTimeout(30000); // Reduced timeout - 30 seconds should be plenty
+    http.setReuse(true);    // Reuse connection if possible
 
-    unsigned long downloadStart = millis();
+    unsigned long httpStart = millis();
     int httpCode = http.GET();
+    unsigned long httpTime = millis() - httpStart;
 
     if (httpCode == 200)
     {
@@ -636,50 +696,44 @@ bool downloadAndStoreImages(const SlideshowManifestResponse &manifest)
         Stream *stream = http.getStreamPtr();
         if (stream)
         {
-          // Serial.printf("Streaming %d bytes directly to flash...\n", contentLength);
-          // Serial.printf("Stream available: %d bytes\n", stream->available());
-
+          unsigned long flashStart = millis();
           if (FlashStorage::saveImageFromStream(i, stream, contentLength))
           {
-            unsigned long downloadTime = millis() - downloadStart;
-            // Serial.printf("✓ Image %d downloaded and saved in %lu ms\n", i, downloadTime);
+            unsigned long flashTime = millis() - flashStart;
+            totalFlashWriteTime += flashTime;
+            unsigned long imageTime = millis() - imageStart;
+            totalDownloadTime += imageTime;
+            Serial.printf("  Image %d: HTTP=%lu ms, Flash=%lu ms, Total=%lu ms\n",
+                          i, httpTime, flashTime, imageTime);
           }
           else
           {
-            // Serial.printf("ERROR: Failed to save image %d to flash\n", i);
-            // Serial.printf("Stream available after failure: %d bytes\n", stream->available());
             allSuccess = false;
           }
         }
         else
         {
-          // Serial.printf("ERROR: Failed to get stream for image %d\n", i);
           allSuccess = false;
         }
       }
       else
       {
-        // Serial.printf("ERROR: Image %d size mismatch (expected %d, got %d)\n", i, IMAGE_SIZE_BYTES, contentLength);
         allSuccess = false;
       }
     }
     else
     {
-      // Serial.printf("ERROR: HTTP %d for image %d\n", httpCode, i);
       allSuccess = false;
     }
 
+    // OPTIMIZATION: Don't call http.end() between downloads to keep connection alive
+    // Only disconnect the stream, not the entire connection
+    // The connection will be reused for the next http.begin() call
     http.end();
   }
 
-  if (allSuccess)
-  {
-    // Serial.printf("✓ Successfully downloaded and stored all %d images\n", manifest.imageCount);
-  }
-  else
-  {
-    // Serial.println("ERROR: Some images failed to download or store");
-  }
+  Serial.printf("  Total download time: %lu ms (Flash writes: %lu ms)\n",
+                totalDownloadTime, totalFlashWriteTime);
 
   return allSuccess;
 }

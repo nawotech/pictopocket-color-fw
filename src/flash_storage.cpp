@@ -55,8 +55,9 @@ bool FlashStorage::saveImageFromStream(int index, Stream* stream, size_t expecte
     return false;
   }
   
-  // Stream data in chunks to avoid large buffer allocation
-  const size_t chunkSize = 4096;  // 4KB chunks
+  // OPTIMIZATION: Use larger chunk size for faster writes (8KB instead of 4KB)
+  // This reduces the number of write operations
+  const size_t chunkSize = 8192;  // 8KB chunks
   uint8_t* chunkBuffer = (uint8_t*)malloc(chunkSize);
   if (!chunkBuffer) {
     file.close();
@@ -66,33 +67,42 @@ bool FlashStorage::saveImageFromStream(int index, Stream* stream, size_t expecte
   size_t totalWritten = 0;
   size_t bytesToRead = expectedSize;
   unsigned long timeout = millis() + 60000;  // 60 second timeout
+  unsigned long lastDataTime = millis();
   
+  // OPTIMIZATION: Read in larger chunks when available to reduce write operations
   // Read until we have all the data or timeout
   while (bytesToRead > 0 && (millis() < timeout)) {
-    // Wait a bit if no data is available yet (data might be arriving)
-    if (stream->available() == 0) {
-      delay(10);
+    size_t available = stream->available();
+    
+    // OPTIMIZATION: Only wait if no data available
+    // Use minimal delay to avoid blocking when data is actively streaming
+    if (available == 0) {
+      // Very short delay - just yield to WiFi stack
+      delayMicroseconds(50);
       continue;
     }
     
+    lastDataTime = millis(); // Update last data time
+    
+    // OPTIMIZATION: Read as much as possible in one go (up to chunkSize)
+    // This reduces the number of write operations to flash
     size_t toRead = (bytesToRead < chunkSize) ? bytesToRead : chunkSize;
-    // Don't read more than what's available
-    if (toRead > (size_t)stream->available()) {
-      toRead = stream->available();
+    // Read all available data if it's less than our target chunk size
+    if (available < toRead) {
+      toRead = available;
     }
     
-    if (toRead == 0) {
-      delay(10);
-      continue;
-    }
-    
+    // OPTIMIZATION: Use readBytes which is more efficient than read()
+    // It will read up to toRead bytes, but may return less if not all available
     size_t bytesRead = stream->readBytes((char*)chunkBuffer, toRead);
     
     if (bytesRead == 0) {
-      delay(10);
+      // No data read - wait a tiny bit and try again
+      delayMicroseconds(50);
       continue;
     }
     
+    // Write to flash - this is the potentially slow operation
     size_t bytesWritten = file.write(chunkBuffer, bytesRead);
     if (bytesWritten != bytesRead) {
       free(chunkBuffer);
