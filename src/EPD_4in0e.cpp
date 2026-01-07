@@ -31,6 +31,9 @@
 #include "EPD_4in0e.h"
 #include "Debug.h"
 #include <LittleFS.h>
+#include <esp_sleep.h>
+#include <driver/gpio.h>
+#include <Arduino.h>
 
 /******************************************************************************
 function :  Software reset
@@ -73,15 +76,64 @@ static void EPD_4IN0E_SendData(UBYTE Data)
 }
 
 /******************************************************************************
-function :  Wait until the busy_pin goes LOW
+function :  Wait until the busy_pin goes HIGH (idle) using light sleep
 parameter:
+    BUSY pin: LOW = busy (display updating), HIGH = idle (display done)
+    Uses light sleep with GPIO wake to save power during long waits
 ******************************************************************************/
 static void EPD_4IN0E_ReadBusyH(void)
 {
     Debug("e-Paper busy H\r\n");
-    while(!DEV_Digital_Read(EPD_BUSY_PIN)) {      //LOW: busy, HIGH: idle
-        DEV_Delay_ms(10);
+    
+    // Check if BUSY is already HIGH (display done)
+    if (DEV_Digital_Read(EPD_BUSY_PIN) == HIGH) {
+        DEV_Delay_ms(200);
+        Debug("e-Paper busy H release\r\n");
+        return;
     }
+    
+    // BUSY is LOW - display is updating
+    // Use light sleep with GPIO wake to save power
+    // ESP32-C3: Wake when BUSY pin goes HIGH (display done)
+    
+    unsigned long timeout = millis() + 60000; // 60 second timeout (safety)
+    bool displayDone = false;
+    
+    while (!displayDone && (millis() < timeout)) {
+        // Check current state before entering sleep
+        if (DEV_Digital_Read(EPD_BUSY_PIN) == HIGH) {
+            displayDone = true;
+            break;
+        }
+        
+        // Configure GPIO wakeup for BUSY pin (HIGH level = display done)
+        // ESP32-C3: Use gpio_wakeup_enable for light sleep
+        gpio_wakeup_enable((gpio_num_t)EPD_BUSY_PIN, GPIO_INTR_HIGH_LEVEL);
+        esp_sleep_enable_gpio_wakeup();
+        
+        // Enter light sleep - will wake when BUSY goes HIGH or timeout
+        esp_light_sleep_start();
+        
+        // Check wake reason
+        esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+        if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
+            // Woke on GPIO - check if BUSY is now HIGH
+            if (DEV_Digital_Read(EPD_BUSY_PIN) == HIGH) {
+                displayDone = true;
+            }
+        }
+        
+        // Disable wakeup (will re-enable if we loop again)
+        gpio_wakeup_disable((gpio_num_t)EPD_BUSY_PIN);
+        
+        // Check timeout
+        if (millis() >= timeout) {
+            Debug("e-Paper busy timeout!\r\n");
+            break;
+        }
+    }
+    
+    // Small delay to ensure display is fully ready
     DEV_Delay_ms(200);
     Debug("e-Paper busy H release\r\n");
 }

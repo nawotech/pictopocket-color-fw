@@ -52,11 +52,51 @@ String globalDeviceKey = ""; // Device key loaded in setup(), used throughout
 
 // Function declarations
 bool connectWiFi();
+bool quickReconnectWiFi(); // Helper to quickly reconnect WiFi after display update
 void updateSlideshow();
 bool displayCurrentImage();
 void advanceToNextImage();
 bool downloadAndStoreImages(const SlideshowManifestResponse &manifest);
 void goToDeepSleep();
+
+// Helper function to quickly reconnect WiFi after display update
+// Uses saved IP/channel for fast reconnection
+bool quickReconnectWiFi()
+{
+  WiFi.mode(WIFI_STA);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  WiFi.setAutoReconnect(false);
+  WiFi.persistent(true);
+
+  // Try to use saved IP/channel for fast reconnection
+  if (has_saved_ip && saved_ip != 0)
+  {
+    IPAddress ip(saved_ip);
+    IPAddress gateway(saved_gateway);
+    IPAddress subnet(saved_subnet);
+    IPAddress dns1(saved_dns1);
+    IPAddress dns2(saved_dns2);
+    WiFi.config(ip, gateway, subnet, dns1, dns2);
+  }
+
+  if (has_saved_info && saved_channel > 0)
+  {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD, saved_channel, saved_bssid);
+  }
+  else
+  {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+
+  // Wait for reconnection with short timeout
+  unsigned long reconnectStart = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - reconnectStart) < 5000)
+  {
+    delay(10);
+  }
+
+  return (WiFi.status() == WL_CONNECTED);
+}
 
 void setup()
 {
@@ -766,10 +806,23 @@ bool displayCurrentImage()
     return false;
   }
 
+  // OPTIMIZATION: Disconnect WiFi before display update to save power
+  // The display update takes ~37 seconds, and ESP is idle during this time
+  // Disconnecting WiFi saves significant power during the display update
+  bool wifiWasConnected = (WiFi.status() == WL_CONNECTED);
+  if (wifiWasConnected)
+  {
+    WiFi.disconnect(true); // Disconnect and disable WiFi to save power
+    // Serial.println("WiFi disconnected for display update (power saving)");
+  }
+
   // Serial.printf("✓ Image file opened (%d bytes)\n", imageFile.size());
   // Serial.println("Streaming image to display...");
 
   // Stream directly from file to display SPI
+  // This will call EPD_4IN0E_TurnOnDisplay() which starts the display update
+  // and waits for BUSY pin (takes ~37 seconds)
+  // Note: The display library polls BUSY pin, but WiFi is off so less power consumed
   bool displaySuccess = EPD_4IN0E_DisplayFromFile(imageFile, IMAGE_SIZE_BYTES);
   imageFile.close();
 
@@ -785,6 +838,20 @@ bool displayCurrentImage()
   // Put display to sleep
   EPD_4IN0E_Sleep();
   // Serial.println("Display put to sleep");
+
+  // Reconnect WiFi if it was connected before (needed for ACK)
+  if (wifiWasConnected)
+  {
+    // Serial.println("Reconnecting WiFi after display update...");
+    if (quickReconnectWiFi())
+    {
+      // Serial.println("✓ WiFi reconnected");
+    }
+    else
+    {
+      // Serial.println("WARNING: WiFi reconnection failed (ACK may fail)");
+    }
+  }
 
   return displaySuccess;
 }
@@ -813,9 +880,9 @@ void goToDeepSleep()
   FlashStorage::end();
 
   // Turn off LED before sleep
-#ifdef LED_PIN
-  digitalWrite(LED_PIN, LOW);
-#endif
+  // #ifdef LED_PIN
+  //   digitalWrite(LED_PIN, LOW);
+  // #endif
 
   const uint64_t WAKEUP_LOW_PIN_BITMASK = 0b000100; // GPIO 2
   esp_deep_sleep_enable_gpio_wakeup(WAKEUP_LOW_PIN_BITMASK, ESP_GPIO_WAKEUP_GPIO_LOW);
