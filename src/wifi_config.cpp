@@ -6,8 +6,7 @@ const char *WIFI_PASSWORD = "BeanFart69!true";
 
 // Firebase Cloud Function URLs - Update these after deploying functions
 // Find URLs in Firebase Console > Functions > [function name] > Copy URL
-const char *GET_SLIDESHOW_VERSION_URL = "https://YOUR-PROJECT-ID.cloudfunctions.net/get_slideshow_version";
-const char *GET_SLIDESHOW_MANIFEST_URL = "https://YOUR-PROJECT-ID.cloudfunctions.net/get_slideshow_manifest";
-const char *GET_SIGNED_URLS_URL = "https://YOUR-PROJECT-ID.cloudfunctions.net/get_signed_urls";
-const char *ACK_DISPLAYED_URL = "https://YOUR-PROJECT-ID.cloudfunctions.net/ack_displayed";
-
+const char *GET_SLIDESHOW_VERSION_URL = "https://get-slideshow-version-5rtbel6b4a-uc.a.run.app";
+const char *GET_SLIDESHOW_MANIFEST_URL = "https://get-slideshow-manifest-5rtbel6b4a-uc.a.run.app";
+const char *GET_SIGNED_URLS_URL = "https://get-signed-urls-5rtbel6b4a-uc.a.run.app";
+const char *ACK_DISPLAYED_URL = "https://ack-displayed-5rtbel6b4a-uc.a.run.app";
